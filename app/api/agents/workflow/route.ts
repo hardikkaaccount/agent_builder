@@ -6,7 +6,8 @@ export async function GET(req: NextRequest) {
     const { searchParams } = new URL(req.url);
     const id = searchParams.get('id');
     if (!id) {
-      return NextResponse.json({ success: false, error: 'Missing id parameter' }, { status: 400 });
+      const workflows = WorkflowStore.getAllWorkflows();
+      return NextResponse.json({ success: true, workflows });
     }
 
     const workflow = WorkflowStore.getWorkflow(id);

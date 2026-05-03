@@ -306,3 +306,106 @@ export function countNodesByStatus(
 
   return counts;
 }
+
+/**
+ * Add a new node to the workflow
+ */
+export function addNodeToWorkflow(workflow: Workflow, node: Partial<AgentNode>): Workflow {
+  const newNode: AgentNode = {
+    id: node.id || generateNodeId(),
+    name: node.name || 'New Agent',
+    description: node.description || '',
+    role: node.role || 'worker',
+    task: node.task || 'New task description',
+    inputs: node.inputs || {},
+    outputs: node.outputs || {},
+    dependencies: node.dependencies || [],
+    environment: node.environment || {},
+    createdAt: new Date(),
+    updatedAt: new Date(),
+    version: 1,
+    ...node,
+  };
+
+  const newNodes = [...workflow.nodes, newNode];
+  const newEdges = [
+    ...workflow.edges,
+    ...newNode.dependencies.map(dep => ({ from: dep, to: newNode.id })),
+  ];
+
+  return {
+    ...workflow,
+    nodes: newNodes,
+    edges: newEdges,
+    nodeCount: newNodes.length,
+    edgeCount: newEdges.length,
+    executionOrder: topologicalSort(newNodes, newEdges) || newNodes.map(n => n.id),
+    updatedAt: new Date(),
+  };
+}
+
+/**
+ * Update an existing node in the workflow
+ */
+export function updateNodeInWorkflow(workflow: Workflow, nodeId: string, updates: Partial<AgentNode>): Workflow {
+  const nodeIndex = workflow.nodes.findIndex(n => n.id === nodeId);
+  if (nodeIndex === -1) return workflow;
+
+  const oldNode = workflow.nodes[nodeIndex];
+  const newNode = { ...oldNode, ...updates, updatedAt: new Date() };
+  
+  const newNodes = [...workflow.nodes];
+  newNodes[nodeIndex] = newNode;
+
+  // Rebuild edges if dependencies changed
+  let newEdges = workflow.edges;
+  if (updates.dependencies) {
+    // Remove old edges targeting this node
+    newEdges = newEdges.filter(e => e.to !== nodeId);
+    // Add new edges
+    newEdges = [
+      ...newEdges,
+      ...updates.dependencies.map(dep => ({ from: dep, to: nodeId })),
+    ];
+  }
+
+  return {
+    ...workflow,
+    nodes: newNodes,
+    edges: newEdges,
+    edgeCount: newEdges.length,
+    executionOrder: topologicalSort(newNodes, newEdges) || newNodes.map(n => n.id),
+    updatedAt: new Date(),
+  };
+}
+
+/**
+ * Remove a node from the workflow
+ */
+export function removeNodeFromWorkflow(workflow: Workflow, nodeId: string): Workflow {
+  const newNodes = workflow.nodes.filter(n => n.id !== nodeId);
+  
+  // Remove edges connected to this node
+  const newEdges = workflow.edges.filter(e => e.from !== nodeId && e.to !== nodeId);
+
+  // Remove this node from other nodes' dependencies
+  const cleanedNodes = newNodes.map(n => {
+    if (n.dependencies.includes(nodeId)) {
+      return {
+        ...n,
+        dependencies: n.dependencies.filter(d => d !== nodeId),
+      };
+    }
+    return n;
+  });
+
+  return {
+    ...workflow,
+    nodes: cleanedNodes,
+    edges: newEdges,
+    nodeCount: cleanedNodes.length,
+    edgeCount: newEdges.length,
+    executionOrder: topologicalSort(cleanedNodes, newEdges) || cleanedNodes.map(n => n.id),
+    updatedAt: new Date(),
+  };
+}

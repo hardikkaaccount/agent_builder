@@ -36,6 +36,9 @@ interface WorkflowBuilderProps {
   isLoading?: boolean;
   editable?: boolean;
   executionState?: ExecutionState;
+  onUpdateNode?: (nodeId: string, updates: Partial<AgentNode>) => void;
+  onAddNode?: () => void;
+  onDeleteNode?: (nodeId: string) => void;
 }
 
 /**
@@ -50,6 +53,9 @@ export function WorkflowBuilder({
   isLoading = false,
   editable = false,
   executionState,
+  onUpdateNode,
+  onAddNode,
+  onDeleteNode,
 }: WorkflowBuilderProps) {
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
 
@@ -145,8 +151,15 @@ export function WorkflowBuilder({
 
         {/* Canvas Controls */}
         <div className="absolute bottom-6 left-6 flex items-center gap-1 p-1.5 bg-[#0F172A] border border-[#1E293B] rounded-xl z-30">
+          {editable && onAddNode && (
+            <button onClick={onAddNode} className="p-2 rounded-lg hover:bg-[#1E293B] text-[#22C55E] transition-colors duration-200 cursor-pointer group relative" title="Add Agent">
+              <Plus size={16} />
+              <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 rounded-md bg-[#1E293B] text-[8px] font-medium text-[#F8FAFC] opacity-0 group-hover:opacity-100 transition-opacity duration-150 whitespace-nowrap uppercase tracking-wider pointer-events-none" style={{ fontFamily: "'Fira Code', monospace" }}>
+                Add Agent
+              </span>
+            </button>
+          )}
           {[
-            { icon: Plus, label: 'Zoom In' },
             { icon: Search, label: 'Fit View' },
             { icon: Layers, label: 'Auto Layout' }
           ].map((control, i) => (
@@ -174,6 +187,9 @@ export function WorkflowBuilder({
                 workflow={workflow} 
                 execution={executionState?.nodeStates[selectedNodeData.id]}
                 onClose={() => setSelectedNode(null)}
+                editable={editable}
+                onUpdate={onUpdateNode}
+                onDelete={onDeleteNode}
               />
             </motion.div>
           )}
@@ -295,15 +311,54 @@ function NodeDetailsPanel({
   node, 
   workflow, 
   execution,
-  onClose 
+  onClose,
+  editable,
+  onUpdate,
+  onDelete
 }: { 
   node: AgentNode; 
   workflow: Workflow; 
   execution?: NodeExecution;
   onClose: () => void;
+  editable?: boolean;
+  onUpdate?: (id: string, updates: Partial<AgentNode>) => void;
+  onDelete?: (id: string) => void;
 }) {
   const dependentNodes = workflow.nodes.filter(n => n.dependencies.includes(node.id));
   const parentNodes = workflow.nodes.filter(n => node.dependencies.includes(n.id));
+
+  const [editState, setEditState] = useState({
+    name: node.name,
+    task: node.task,
+    role: node.role,
+    model: node.model || 'default',
+    dependencies: node.dependencies || [],
+  });
+
+  useEffect(() => {
+    setEditState({
+      name: node.name,
+      task: node.task,
+      role: node.role,
+      model: node.model || 'default',
+      dependencies: node.dependencies || [],
+    });
+  }, [node]);
+
+  const handleSave = () => {
+    if (onUpdate) {
+      onUpdate(node.id, editState);
+    }
+  };
+
+  const handleDependencyToggle = (targetId: string) => {
+    setEditState(prev => ({
+      ...prev,
+      dependencies: prev.dependencies.includes(targetId)
+        ? prev.dependencies.filter(id => id !== targetId)
+        : [...prev.dependencies, targetId]
+    }));
+  };
 
   return (
     <div className="h-full flex flex-col p-8 select-text no-scrollbar overflow-auto bg-[#0F172A]" style={{ fontFamily: "'Fira Sans', system-ui, sans-serif" }}>
@@ -312,7 +367,7 @@ function NodeDetailsPanel({
           <div className="w-10 h-10 rounded-xl bg-[#22C55E]/10 border border-[#22C55E]/20 flex items-center justify-center">
             <Settings className="w-5 h-5 text-[#22C55E]" />
           </div>
-          <h2 className="text-lg font-semibold text-[#F8FAFC] tracking-tight">Configuration</h2>
+          <h2 className="text-lg font-semibold text-[#F8FAFC] tracking-tight">{editable ? 'Edit Agent' : 'Configuration'}</h2>
         </div>
         <button 
           onClick={onClose}
@@ -322,18 +377,41 @@ function NodeDetailsPanel({
         </button>
       </div>
 
-      <div className="space-y-8">
+      <div className="space-y-8 flex-1">
         {/* Core Identity */}
         <section>
           <label className="text-[9px] font-semibold text-slate-500 uppercase tracking-widest mb-3 ml-0.5 block" style={{ fontFamily: "'Fira Code', monospace" }}>Agent Identity</label>
-          <div className="p-5 bg-[#020617] rounded-xl border border-[#1E293B] space-y-3">
-            <div className="flex items-center justify-between">
-              <span className="text-sm font-semibold text-[#F8FAFC]">{node.name}</span>
-              <span className="text-[9px] text-slate-600" style={{ fontFamily: "'Fira Code', monospace" }}>ID: {node.id}</span>
+          <div className="p-5 bg-[#020617] rounded-xl border border-[#1E293B] space-y-4">
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between">
+                <span className="text-[9px] text-slate-600" style={{ fontFamily: "'Fira Code', monospace" }}>NAME</span>
+                <span className="text-[9px] text-slate-600" style={{ fontFamily: "'Fira Code', monospace" }}>ID: {node.id}</span>
+              </div>
+              {editable ? (
+                <input 
+                  type="text" 
+                  value={editState.name}
+                  onChange={e => setEditState(prev => ({ ...prev, name: e.target.value }))}
+                  className="w-full bg-[#0F172A] border border-[#1E293B] rounded-lg px-3 py-2 text-sm text-[#F8FAFC] focus:outline-none focus:border-[#22C55E]/50 transition-colors"
+                />
+              ) : (
+                <span className="text-sm font-semibold text-[#F8FAFC]">{node.name}</span>
+              )}
             </div>
-            <p className="text-xs text-slate-400 leading-relaxed italic">
-              "{node.task}"
-            </p>
+            <div className="flex flex-col gap-2">
+              <span className="text-[9px] text-slate-600" style={{ fontFamily: "'Fira Code', monospace" }}>TASK / PROMPT</span>
+              {editable ? (
+                <textarea 
+                  value={editState.task}
+                  onChange={e => setEditState(prev => ({ ...prev, task: e.target.value }))}
+                  className="w-full bg-[#0F172A] border border-[#1E293B] rounded-lg px-3 py-2 text-xs text-slate-300 focus:outline-none focus:border-[#22C55E]/50 transition-colors min-h-[100px] resize-y"
+                />
+              ) : (
+                <p className="text-xs text-slate-400 leading-relaxed italic">
+                  "{node.task}"
+                </p>
+              )}
+            </div>
           </div>
         </section>
 
@@ -343,11 +421,31 @@ function NodeDetailsPanel({
           <div className="grid grid-cols-2 gap-3">
             <div className="p-4 bg-[#020617] border border-[#1E293B] rounded-xl flex flex-col gap-1.5 hover:border-[#1E293B]/80 transition-colors duration-200">
               <span className="text-[9px] text-slate-500 font-medium uppercase tracking-wider" style={{ fontFamily: "'Fira Code', monospace" }}>Model</span>
-              <span className="text-xs font-medium text-slate-300 truncate" style={{ fontFamily: "'Fira Code', monospace" }}>{(node.model ?? 'default').split('/').pop()}</span>
+              {editable ? (
+                <input 
+                  type="text"
+                  value={editState.model}
+                  onChange={e => setEditState(prev => ({ ...prev, model: e.target.value }))}
+                  className="w-full bg-[#0F172A] border border-[#1E293B] rounded-md px-2 py-1 text-xs text-[#F8FAFC] focus:outline-none focus:border-[#22C55E]/50"
+                  placeholder="e.g. gpt-4o"
+                />
+              ) : (
+                <span className="text-xs font-medium text-slate-300 truncate" style={{ fontFamily: "'Fira Code', monospace" }}>{(node.model ?? 'default').split('/').pop()}</span>
+              )}
             </div>
             <div className="p-4 bg-[#020617] border border-[#1E293B] rounded-xl flex flex-col gap-1.5 hover:border-[#1E293B]/80 transition-colors duration-200">
-              <span className="text-[9px] text-slate-500 font-medium uppercase tracking-wider" style={{ fontFamily: "'Fira Code', monospace" }}>Entropy</span>
-              <span className="text-xs font-medium text-slate-300" style={{ fontFamily: "'Fira Code', monospace" }}>0.7 (Stable)</span>
+              <span className="text-[9px] text-slate-500 font-medium uppercase tracking-wider" style={{ fontFamily: "'Fira Code', monospace" }}>Role</span>
+              {editable ? (
+                <input 
+                  type="text"
+                  value={editState.role}
+                  onChange={e => setEditState(prev => ({ ...prev, role: e.target.value }))}
+                  className="w-full bg-[#0F172A] border border-[#1E293B] rounded-md px-2 py-1 text-xs text-[#F8FAFC] focus:outline-none focus:border-[#22C55E]/50"
+                  placeholder="e.g. worker"
+                />
+              ) : (
+                <span className="text-xs font-medium text-slate-300" style={{ fontFamily: "'Fira Code', monospace" }}>{node.role}</span>
+              )}
             </div>
           </div>
         </section>
@@ -356,37 +454,60 @@ function NodeDetailsPanel({
         <section>
           <label className="text-[9px] font-semibold text-slate-500 uppercase tracking-widest mb-3 ml-0.5 block" style={{ fontFamily: "'Fira Code', monospace" }}>Pipeline Topology</label>
           <div className="space-y-3">
-            {parentNodes.length > 0 && (
+            {editable ? (
               <div className="flex flex-col gap-2">
-                <span className="text-[9px] text-slate-600 font-medium ml-0.5 uppercase" style={{ fontFamily: "'Fira Code', monospace" }}>Inherits From</span>
+                <span className="text-[9px] text-slate-600 font-medium ml-0.5 uppercase" style={{ fontFamily: "'Fira Code', monospace" }}>Dependencies (Inherits From)</span>
                 <div className="flex flex-wrap gap-2">
-                  {parentNodes.map(p => (
-                    <div key={p.id} className="px-3 py-1.5 rounded-lg bg-[#22C55E]/10 border border-[#22C55E]/20 text-[10px] text-[#22C55E] font-medium flex items-center gap-1.5">
-                      <div className="w-1 h-1 rounded-full bg-[#22C55E]" />
-                      {p.name}
-                    </div>
-                  ))}
+                  {workflow.nodes.filter(n => n.id !== node.id).map(n => {
+                    const isSelected = editState.dependencies.includes(n.id);
+                    return (
+                      <button
+                        key={n.id}
+                        onClick={() => handleDependencyToggle(n.id)}
+                        className={`px-3 py-1.5 rounded-lg text-[10px] font-medium flex items-center gap-1.5 transition-colors border ${isSelected ? 'bg-[#22C55E]/10 border-[#22C55E]/50 text-[#22C55E]' : 'bg-[#020617] border-[#1E293B] text-slate-400 hover:border-slate-600'}`}
+                      >
+                        <div className={`w-1 h-1 rounded-full ${isSelected ? 'bg-[#22C55E]' : 'bg-slate-600'}`} />
+                        {n.name}
+                      </button>
+                    )
+                  })}
                 </div>
               </div>
-            )}
-            {dependentNodes.length > 0 && (
-              <div className="flex flex-col gap-2">
-                <span className="text-[9px] text-slate-600 font-medium ml-0.5 uppercase" style={{ fontFamily: "'Fira Code', monospace" }}>Propagates To</span>
-                <div className="flex flex-wrap gap-2">
-                  {dependentNodes.map(d => (
-                    <div key={d.id} className="px-3 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-[10px] text-cyan-400 font-medium flex items-center gap-1.5">
-                      <div className="w-1 h-1 rounded-full bg-cyan-400" />
-                      {d.name}
+            ) : (
+              <>
+                {parentNodes.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[9px] text-slate-600 font-medium ml-0.5 uppercase" style={{ fontFamily: "'Fira Code', monospace" }}>Inherits From</span>
+                    <div className="flex flex-wrap gap-2">
+                      {parentNodes.map(p => (
+                        <div key={p.id} className="px-3 py-1.5 rounded-lg bg-[#22C55E]/10 border border-[#22C55E]/20 text-[10px] text-[#22C55E] font-medium flex items-center gap-1.5">
+                          <div className="w-1 h-1 rounded-full bg-[#22C55E]" />
+                          {p.name}
+                        </div>
+                      ))}
                     </div>
-                  ))}
-                </div>
-              </div>
+                  </div>
+                )}
+                {dependentNodes.length > 0 && (
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[9px] text-slate-600 font-medium ml-0.5 uppercase" style={{ fontFamily: "'Fira Code', monospace" }}>Propagates To</span>
+                    <div className="flex flex-wrap gap-2">
+                      {dependentNodes.map(d => (
+                        <div key={d.id} className="px-3 py-1.5 rounded-lg bg-cyan-500/10 border border-cyan-500/20 text-[10px] text-cyan-400 font-medium flex items-center gap-1.5">
+                          <div className="w-1 h-1 rounded-full bg-cyan-400" />
+                          {d.name}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </section>
 
         {/* Agent Output Data */}
-        {execution?.output && (
+        {execution?.output && !editable && (
           <section>
             <div className="flex items-center justify-between mb-3">
               <label className="text-[9px] font-semibold text-[#22C55E] uppercase tracking-widest ml-0.5" style={{ fontFamily: "'Fira Code', monospace" }}>Result</label>
@@ -403,7 +524,7 @@ function NodeDetailsPanel({
         )}
 
         {/* Error Handling */}
-        {execution?.error && (
+        {execution?.error && !editable && (
           <section>
             <label className="text-[9px] font-semibold text-red-400 uppercase tracking-widest ml-0.5 mb-3 block" style={{ fontFamily: "'Fira Code', monospace" }}>Fault Diagnosis</label>
             <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-5">
@@ -414,6 +535,25 @@ function NodeDetailsPanel({
           </section>
         )}
       </div>
+
+      {editable && (
+        <div className="mt-8 pt-6 border-t border-[#1E293B] flex items-center justify-between">
+          {onDelete && (
+            <button 
+              onClick={() => onDelete(node.id)}
+              className="px-4 py-2 rounded-lg bg-red-500/10 text-red-400 hover:bg-red-500/20 hover:text-red-300 text-xs font-semibold transition-colors flex items-center gap-2"
+            >
+              <Trash2 size={14} /> Delete
+            </button>
+          )}
+          <button 
+            onClick={handleSave}
+            className="px-6 py-2 rounded-lg bg-[#22C55E] text-[#020617] hover:bg-[#22C55E]/90 text-xs font-semibold transition-colors flex items-center gap-2 ml-auto shadow-[0_0_15px_rgba(34,197,94,0.3)]"
+          >
+            <Save size={14} /> Save Changes
+          </button>
+        </div>
+      )}
     </div>
   );
 }
