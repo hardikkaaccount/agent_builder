@@ -44,6 +44,7 @@ export default function GenerationPage() {
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [mounted, setMounted] = useState(false);
   const [messages, setMessages] = useState<Message[]>([{
     id: '1', role: 'assistant',
     content: 'System online. I am your Master Orchestrator. Describe your objective and I will architect a multi-agent system to execute it.',
@@ -77,6 +78,7 @@ export default function GenerationPage() {
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
   useEffect(() => { telemetryEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [telemetry]);
+  useEffect(() => { setMounted(true); }, []);
   useEffect(() => {
     return () => {
       if (eventSourceRef.current) {
@@ -101,6 +103,16 @@ export default function GenerationPage() {
 
   const addTelemetry = useCallback((entry: TelemetryEntry) => {
     setTelemetry(prev => [...prev.slice(-200), entry]);
+  }, []);
+
+  const formatTime = useCallback((value: Date | string) => {
+    const d = typeof value === 'string' ? new Date(value) : value;
+    if (Number.isNaN(d.getTime())) return '--:--';
+    const hours24 = d.getHours();
+    const hours12 = ((hours24 + 11) % 12) + 1;
+    const minutes = d.getMinutes().toString().padStart(2, '0');
+    const suffix = hours24 >= 12 ? 'PM' : 'AM';
+    return `${hours12.toString().padStart(2, '0')}:${minutes} ${suffix}`;
   }, []);
 
   const handleGenerateWorkflow = async (userGoal: string) => {
@@ -443,7 +455,7 @@ export default function GenerationPage() {
                     {msg.content}
                   </div>
                   <span className="text-[8px] text-slate-600 uppercase px-1" style={{ fontFamily: "'Fira Code', monospace" }}>
-                    {msg.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    {mounted ? formatTime(msg.timestamp) : '--:--'}
                   </span>
                 </div>
               </motion.div>
@@ -588,7 +600,7 @@ export default function GenerationPage() {
                     ) : (
                       telemetry.map((t, i) => (
                         <div key={i} className="flex gap-3 group items-start py-0.5 hover:bg-[#1E293B]/20 px-2 -mx-2 rounded transition-colors duration-150">
-                          <span className="text-slate-700 shrink-0 tabular-nums">[{new Date(t.timestamp).toLocaleTimeString()}]</span>
+                          <span className="text-slate-700 shrink-0 tabular-nums">[{mounted ? formatTime(t.timestamp) : '--:--'}]</span>
                           <span className={`shrink-0 w-16 font-semibold uppercase ${
                             t.type === 'node_failed' || t.level === 'error' ? 'text-red-400' :
                             t.type === 'node_tool_call' ? 'text-amber-400' :
@@ -604,7 +616,7 @@ export default function GenerationPage() {
                     )}
                     {isExecuting && (
                       <div className="flex gap-3 italic text-cyan-400/30 animate-pulse px-2">
-                        <span className="text-slate-700">[{new Date().toLocaleTimeString()}]</span>
+                        <span className="text-slate-700">[{mounted ? formatTime(new Date()) : '--:--'}]</span>
                         <span className="w-16 font-semibold">STREAM</span>
                         <span>awaiting next cycle...</span>
                       </div>
