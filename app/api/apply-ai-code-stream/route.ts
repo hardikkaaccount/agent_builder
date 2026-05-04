@@ -1256,13 +1256,18 @@ export async function POST(request: NextRequest) {
         // Ensure preview server is up (self-heal) so iframe is never blank after apply.
         try {
           const getHttpCode = async () => {
-            const probe = await providerInstance.runCommand('curl -s -o /dev/null -w "%{http_code}" http://localhost:3000');
-            const code = String(probe?.stdout || '').trim();
-            return code;
+            const probe = await providerInstance.runCommand('sh -c \'code5173=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173 || true); code3000=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || true); echo "$code5173,$code3000"\'');
+            const raw = String(probe?.stdout || '').trim();
+            const [code5173, code3000] = raw.split(',');
+            return { code5173: (code5173 || '').trim(), code3000: (code3000 || '').trim() };
           };
 
-          let code = await getHttpCode();
-          const isReady = code === '200' || code === '304';
+          let codes = await getHttpCode();
+          const isReady =
+            codes.code5173 === '200' ||
+            codes.code5173 === '304' ||
+            codes.code3000 === '200' ||
+            codes.code3000 === '304';
           if (!isReady) {
             await sendProgress({ type: 'status', message: 'Preview server not ready. Starting dev server...' });
             await providerInstance.runCommand('pkill -f vite || true');
@@ -1271,8 +1276,13 @@ export async function POST(request: NextRequest) {
             let ready = false;
             for (let i = 0; i < 60; i++) {
               await new Promise((resolve) => setTimeout(resolve, 1000));
-              code = await getHttpCode();
-              if (code === '200' || code === '304') {
+              codes = await getHttpCode();
+              if (
+                codes.code5173 === '200' ||
+                codes.code5173 === '304' ||
+                codes.code3000 === '200' ||
+                codes.code3000 === '304'
+              ) {
                 ready = true;
                 break;
               }
