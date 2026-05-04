@@ -83,7 +83,17 @@ export async function POST(request: NextRequest) {
 
     // Start installation in background
     (async (providerInstance) => {
+      let heartbeat: NodeJS.Timeout | null = null;
       try {
+        // Keep SSE alive during long installs to avoid upstream body timeout.
+        heartbeat = setInterval(async () => {
+          try {
+            await sendProgress({ type: 'heartbeat', message: 'Installing packages...' });
+          } catch {
+            // Ignore write errors; main flow handles connection closure.
+          }
+        }, 15000);
+
         await sendProgress({ 
           type: 'start', 
           message: `Installing ${validPackages.length} package${validPackages.length > 1 ? 's' : ''}...`,
@@ -249,6 +259,7 @@ export async function POST(request: NextRequest) {
           });
         }
       } finally {
+        if (heartbeat) clearInterval(heartbeat);
         await writer.close();
       }
     })(provider);
