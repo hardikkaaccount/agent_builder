@@ -79,9 +79,10 @@ export async function POST(request: NextRequest) {
 
       await providerInstance.runCommand('pkill -f vite || true');
       await providerInstance.runCommand('cd /vercel/sandbox && nohup npm run dev > /tmp/vite.log 2>&1 &');
+      await sendProgress({ type: 'status', message: 'Waiting for development server to become ready...' });
 
       const waitResult = await providerInstance.runCommand(
-        'sh -c "for i in $(seq 1 60); do code=$(curl -s -o /dev/null -w \\"%{http_code}\\" http://localhost:3000 || true); if [ \\"$code\\" = \\"200\\" ] || [ \\"$code\\" = \\"304\\" ]; then exit 0; fi; sleep 1; done; exit 1"'
+        'sh -c "for i in $(seq 1 60); do code5173=$(curl -s -o /dev/null -w \\"%{http_code}\\" http://localhost:5173 || true); code3000=$(curl -s -o /dev/null -w \\"%{http_code}\\" http://localhost:3000 || true); if [ \\"$code5173\\" = \\"200\\" ] || [ \\"$code5173\\" = \\"304\\" ] || [ \\"$code3000\\" = \\"200\\" ] || [ \\"$code3000\\" = \\"304\\" ]; then exit 0; fi; sleep 1; done; exit 1"'
       );
 
       if (waitResult?.exitCode !== 0) {
@@ -89,7 +90,7 @@ export async function POST(request: NextRequest) {
       }
 
       // Warm Vite cache so first browser render avoids module timeout spikes.
-      await providerInstance.runCommand('sh -c "curl -s http://localhost:3000 > /tmp/vite-prewarm.html || true; curl -s http://localhost:3000/src/main.jsx > /tmp/vite-prewarm-main.js || true"');
+      await providerInstance.runCommand('sh -c "curl -s http://localhost:5173 > /tmp/vite-prewarm.html || true; curl -s http://localhost:5173/src/main.jsx > /tmp/vite-prewarm-main.js || true; curl -s http://localhost:3000 > /tmp/vite-prewarm-3000.html || true"');
     };
 
     // Start installation in background

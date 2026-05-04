@@ -112,7 +112,7 @@ function createLegacySandboxAdapter(rawSandbox: any, sandboxData?: any) {
         cmd: 'sh',
         args: [
           '-c',
-          'for i in $(seq 1 60); do code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || true); if [ "$code" = "200" ] || [ "$code" = "304" ]; then exit 0; fi; sleep 1; done; exit 1'
+          'for i in $(seq 1 60); do code5173=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:5173 || true); code3000=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || true); if [ "$code5173" = "200" ] || [ "$code5173" = "304" ] || [ "$code3000" = "200" ] || [ "$code3000" = "304" ]; then exit 0; fi; sleep 1; done; exit 1'
         ],
         cwd: '/',
       });
@@ -125,7 +125,7 @@ function createLegacySandboxAdapter(rawSandbox: any, sandboxData?: any) {
       // Prewarm common entrypoints to reduce first-hit timeout risk.
       await rawSandbox.runCommand({
         cmd: 'sh',
-        args: ['-c', 'curl -s http://localhost:3000 > /tmp/vite-prewarm.html || true; curl -s http://localhost:3000/src/main.jsx > /tmp/vite-prewarm-main.js || true'],
+        args: ['-c', 'curl -s http://localhost:5173 > /tmp/vite-prewarm.html || true; curl -s http://localhost:5173/src/main.jsx > /tmp/vite-prewarm-main.js || true; curl -s http://localhost:3000 > /tmp/vite-prewarm-3000.html || true'],
         cwd: '/',
       });
     },
