@@ -1296,6 +1296,7 @@ MORPH FAST APPLY MODE (EDIT-ONLY):
         // Make streaming API call with appropriate provider
         const streamOptions: any = {
           model: modelProvider(actualModel) as any, // Cast to any for v3 model compatibility
+          allowSystemInMessages: true,
           messages: [
             { 
               role: 'system', 
@@ -1673,6 +1674,7 @@ It's better to have 3 complete files than 10 incomplete files.`
           try {
             const strictResult = await generateText({
               model: modelProvider(actualModel) as any,
+              allowSystemInMessages: true,
               messages: [
                 {
                   role: 'system',
@@ -1869,6 +1871,7 @@ Provide the complete file content without any truncation. Include all necessary 
                 
                 const completionResult = await streamText({
                   model: completionClient(completionModelName),
+                  allowSystemInMessages: true,
                   messages: [
                     { 
                       role: 'system', 
@@ -2071,6 +2074,7 @@ async function runPlanningPass(params: {
 }): Promise<string> {
   const result = await generateText({
     model: params.modelProvider(params.actualModel) as any,
+    allowSystemInMessages: true,
     messages: [
       { role: 'system', content: params.system },
       { role: 'user', content: params.user },
