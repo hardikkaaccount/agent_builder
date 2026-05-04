@@ -99,7 +99,7 @@ export async function POST(request: NextRequest) {
         // Keep SSE alive during long installs to avoid upstream body timeout.
         heartbeat = setInterval(async () => {
           try {
-            await sendProgress({ type: 'heartbeat', message: 'Installing packages...' });
+            await sendProgress({ type: 'heartbeat' });
           } catch {
             // Ignore write errors; main flow handles connection closure.
           }

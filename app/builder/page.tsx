@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import {
   Sparkles, Send, Bot, User, Loader2, RefreshCw, ExternalLink,
   Code2, Network, Eye, FileCode, ChevronRight, Terminal, X,
@@ -9,9 +9,9 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { appConfig } from '@/config/app.config';
 
-// ─────────────────────────────────────────────────────────────────
+// 
 // Types
-// ─────────────────────────────────────────────────────────────────
+// 
 
 interface Message {
   id: string;
@@ -35,16 +35,16 @@ interface BuilderState {
 
 type RightTab = 'preview' | 'code' | 'nodes';
 
-// ─────────────────────────────────────────────────────────────────
+// 
 // Page Component
-// ─────────────────────────────────────────────────────────────────
+// 
 
 export default function BuilderPage() {
   const [prompt, setPrompt] = useState('');
   const [messages, setMessages] = useState<Message[]>([
     {
       id: '1', role: 'assistant',
-      content: 'Welcome to AgentFlow. Describe the AI agent you want to build and I\'ll generate a complete working application for you.\n\nExamples:\n• "Build a travel planning agent"\n• "Create a code review assistant"\n• "Make a customer support chatbot"',
+      content: 'Welcome to AgentFlow. Describe the AI agent you want to build and I\'ll generate a complete working application for you.\n\nExamples:\n "Build a travel planning agent"\n "Create a code review assistant"\n "Make a customer support chatbot"',
       timestamp: new Date()
     }
   ]);
@@ -85,7 +85,7 @@ export default function BuilderPage() {
     }]);
   }, [createMessageId]);
 
-  // ─── Step 1: Create Sandbox ────────────────────────────────
+  //  Step 1: Create Sandbox 
   const createSandbox = useCallback(async (): Promise<{ sandboxId: string; url: string } | null> => {
     setState(prev => ({ ...prev, phase: 'creating-sandbox', error: null }));
     addMessage('system', 'Setting up sandbox environment...');
@@ -113,7 +113,7 @@ export default function BuilderPage() {
     }
   }, [addMessage]);
 
-  // ─── Step 2: Generate Code ─────────────────────────────────
+  //  Step 2: Generate Code 
   const generateCode = useCallback(async (userPrompt: string, sandboxId: string, isEdit: boolean): Promise<string | null> => {
     setState(prev => ({ ...prev, phase: isEdit ? 'editing' : 'generating' }));
 
@@ -159,7 +159,7 @@ export default function BuilderPage() {
               } else if (data.type === 'status') {
                 addMessage('system', data.message);
               } else if (data.type === 'conversation' && data.text) {
-                // AI explanation text — show to user
+                // AI explanation text  show to user
                 
               } else if (data.type === 'component') {
                 addMessage('system', `Generated: ${data.name}`);
@@ -182,7 +182,7 @@ export default function BuilderPage() {
     }
   }, [addMessage]);
 
-  // ─── Step 3: Apply Code ────────────────────────────────────
+  //  Step 3: Apply Code 
   const applyCode = useCallback(async (response: string, sandboxId: string, isEdit: boolean): Promise<boolean> => {
     setState(prev => ({ ...prev, phase: 'applying' }));
     addMessage('system', 'Applying code to sandbox...');
@@ -224,11 +224,13 @@ export default function BuilderPage() {
               if (data.type === 'file-complete') {
                 addMessage('system', `Applied: ${data.fileName}`);
               } else if (data.type === 'file-progress') {
-                // File being written — silent
+                // File being written  silent
               } else if (data.type === 'step') {
                 addMessage('system', data.message);
               } else if (data.type === 'package-progress') {
-                if (data.message) addMessage('system', data.message);
+                if (data.packageEventType !== 'heartbeat' && data.message) {
+                  addMessage('system', data.message);
+                }
               } else if (data.type === 'error') {
                 applyHadErrors = true;
                 addMessage('system', `Error: ${data.error || data.message || 'Unknown apply error'}`);
@@ -287,7 +289,7 @@ export default function BuilderPage() {
         if (filesRes.ok) {
           const filesData = await filesRes.json();
           if (filesData.success && filesData.files) {
-            // API returns Record<string, string> — path → raw content
+            // API returns Record<string, string>  path  raw content
             const fileList: GeneratedFile[] = Object.entries(filesData.files)
               .map(([path, content]: [string, any]) => ({
                 path,
@@ -314,7 +316,7 @@ export default function BuilderPage() {
     }
   }, [addMessage]);
 
-  // ─── Main Submit Handler ───────────────────────────────────
+  //  Main Submit Handler 
   const handleSubmit = useCallback(async () => {
     const userPrompt = prompt.trim();
     if (!userPrompt) return;
@@ -371,16 +373,135 @@ export default function BuilderPage() {
     'error': 'Error',
   };
 
-  // ─── Get selected file content ─────────────────────────────
+  //  Get selected file content 
   const selectedFileContent = selectedFile
     ? state.files.find(f => f.path === selectedFile)?.content || ''
     : '';
 
-  // ─── Render ────────────────────────────────────────────────
+  const architectureGraph = useMemo(() => {
+    const codeFiles = state.files.filter(f =>
+      f.path.endsWith('.jsx') || f.path.endsWith('.tsx') || f.path.endsWith('.js') || f.path.endsWith('.ts')
+    );
+
+    if (codeFiles.length === 0) {
+      return { columns: [] as string[][], nodeMeta: {} as Record<string, any>, edges: [] as Array<{ from: string; to: string }> };
+    }
+
+    const normalizePath = (p: string) => p.replace(/^\/+/, '');
+    const byPath = new Map<string, GeneratedFile>();
+    for (const file of codeFiles) {
+      byPath.set(normalizePath(file.path), file);
+    }
+
+    const resolveLocalImport = (fromPath: string, importPath: string): string | null => {
+      const from = normalizePath(fromPath);
+      const baseDir = from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : '';
+      const stack = baseDir ? baseDir.split('/') : [];
+
+      for (const part of importPath.split('/')) {
+        if (!part || part === '.') continue;
+        if (part === '..') stack.pop();
+        else stack.push(part);
+      }
+
+      const candidateBase = stack.join('/');
+      const candidates = [
+        candidateBase,
+        `${candidateBase}.js`,
+        `${candidateBase}.jsx`,
+        `${candidateBase}.ts`,
+        `${candidateBase}.tsx`,
+        `${candidateBase}/index.js`,
+        `${candidateBase}/index.jsx`,
+        `${candidateBase}/index.ts`,
+        `${candidateBase}/index.tsx`,
+      ];
+
+      for (const candidate of candidates) {
+        if (byPath.has(candidate)) return candidate;
+      }
+
+      return null;
+    };
+
+    const nodeMeta: Record<string, any> = {};
+    const incoming = new Map<string, Set<string>>();
+    const outgoing = new Map<string, Set<string>>();
+    const edges: Array<{ from: string; to: string }> = [];
+
+    for (const [path, file] of byPath.entries()) {
+      incoming.set(path, new Set());
+      outgoing.set(path, new Set());
+      const fileName = path.split('/').pop() || path;
+      const isComponent = /^[A-Z]/.test(fileName.replace(/\.(jsx|tsx|js|ts)$/, ''));
+      nodeMeta[path] = {
+        path,
+        fileName,
+        isComponent,
+        lines: file.content.split('\n').length,
+      };
+    }
+
+    const importRegex = /import\s+[\s\S]*?\sfrom\s+['"]([^'"]+)['"]/g;
+    for (const [path, file] of byPath.entries()) {
+      let match: RegExpExecArray | null;
+      while ((match = importRegex.exec(file.content)) !== null) {
+        const imp = match[1];
+        if (!imp.startsWith('./') && !imp.startsWith('../')) continue;
+        const dep = resolveLocalImport(path, imp);
+        if (!dep || dep === path) continue;
+
+        incoming.get(path)?.add(dep);
+        outgoing.get(dep)?.add(path);
+        edges.push({ from: dep, to: path });
+      }
+    }
+
+    const indegree = new Map<string, number>();
+    const depth = new Map<string, number>();
+    const queue: string[] = [];
+
+    for (const path of byPath.keys()) {
+      const deg = incoming.get(path)?.size || 0;
+      indegree.set(path, deg);
+      depth.set(path, 0);
+      if (deg === 0) queue.push(path);
+    }
+
+    while (queue.length > 0) {
+      const cur = queue.shift()!;
+      const curDepth = depth.get(cur) || 0;
+      for (const next of outgoing.get(cur) || []) {
+        depth.set(next, Math.max(depth.get(next) || 0, curDepth + 1));
+        indegree.set(next, (indegree.get(next) || 1) - 1);
+        if ((indegree.get(next) || 0) === 0) queue.push(next);
+      }
+    }
+
+    // Cycle fallback
+    for (const path of byPath.keys()) {
+      if ((indegree.get(path) || 0) > 0 && (depth.get(path) || 0) === 0) {
+        depth.set(path, 1);
+      }
+    }
+
+    const maxDepth = Math.max(...Array.from(depth.values()), 0);
+    const columns: string[][] = Array.from({ length: maxDepth + 1 }, () => []);
+    for (const path of byPath.keys()) {
+      columns[depth.get(path) || 0].push(path);
+    }
+    for (const col of columns) {
+      col.sort((a, b) => a.localeCompare(b));
+    }
+
+    return { columns, nodeMeta, edges };
+  }, [state.files]);
+
+  //  Render 
   return (
     <div className="h-screen w-full bg-[#020617] text-[#F8FAFC] flex flex-col overflow-hidden" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
 
-      {/* ─── Header ─── */}
+      {/*  Header  */}
       <header className="relative z-50 h-14 min-h-[56px] shrink-0 border-b border-[#1E293B]/60 bg-[#0F172A]/95 backdrop-blur-sm px-5 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-8 h-8 rounded-lg bg-[#22C55E] flex items-center justify-center shadow-[0_0_15px_rgba(34,197,94,0.3)]">
@@ -418,10 +539,10 @@ export default function BuilderPage() {
         </div>
       </header>
 
-      {/* ─── Main Content ─── */}
+      {/*  Main Content  */}
       <div className="flex-1 flex overflow-hidden">
 
-        {/* ─── LEFT: Chat Panel ─── */}
+        {/*  LEFT: Chat Panel  */}
         <div className="w-[380px] min-w-[340px] border-r border-[#1E293B]/60 flex flex-col bg-[#0F172A]/50">
 
           {/* Chat Messages */}
@@ -505,7 +626,7 @@ export default function BuilderPage() {
           </div>
         </div>
 
-        {/* ─── CENTER + RIGHT: Preview / Code / Nodes ─── */}
+        {/*  CENTER + RIGHT: Preview / Code / Nodes  */}
         <div className="flex-1 flex flex-col overflow-hidden">
 
           {/* Tab Bar */}
@@ -541,7 +662,7 @@ export default function BuilderPage() {
           {/* Tab Content */}
           <div className="flex-1 relative overflow-hidden">
 
-            {/* ─── Preview Tab ─── */}
+            {/*  Preview Tab  */}
             {rightTab === 'preview' && (
               <div className="absolute inset-0 flex items-center justify-center bg-[#020617]">
                 {state.sandboxUrl ? (
@@ -566,7 +687,7 @@ export default function BuilderPage() {
               </div>
             )}
 
-            {/* ─── Code Tab ─── */}
+            {/*  Code Tab  */}
             {rightTab === 'code' && (
               <div className="absolute inset-0 flex">
                 {/* File Tree */}
@@ -618,10 +739,10 @@ export default function BuilderPage() {
               </div>
             )}
 
-            {/* ─── Nodes Tab ─── */}
+            {/* Nodes Tab */}
             {rightTab === 'nodes' && (
               <div className="absolute inset-0 overflow-auto no-scrollbar p-8">
-                <div className="max-w-3xl mx-auto">
+                <div className="max-w-6xl mx-auto">
                   <div className="text-[9px] font-semibold text-slate-500 uppercase tracking-widest mb-6" style={{ fontFamily: "'Fira Code', monospace" }}>
                     Architecture Breakdown
                   </div>
@@ -631,55 +752,65 @@ export default function BuilderPage() {
                       Generate an agent to see its architecture
                     </div>
                   ) : (
-                    <div className="space-y-4">
-                      {state.files
-                        .filter(f => f.path.endsWith('.jsx') || f.path.endsWith('.tsx') || f.path.endsWith('.js') || f.path.endsWith('.ts'))
-                        .map((file, idx) => {
-                          const fileName = file.path.split('/').pop() || file.path;
-                          const isComponent = /^[A-Z]/.test(fileName.replace(/\.(jsx|tsx|js|ts)$/, ''));
-                          const imports = (file.content.match(/import .+ from ['"](.+)['"]/g) || [])
-                            .map(m => m.match(/from ['"](.+)['"]/)?.[1] || '')
-                            .filter(m => m.startsWith('./') || m.startsWith('../'));
+                    <div className="space-y-6">
+                      <div className="flex gap-4 overflow-x-auto pb-2">
+                        {architectureGraph.columns.map((column, colIdx) => (
+                          <div key={`col-${colIdx}`} className="min-w-[220px] flex-1">
+                            <div className="mb-3 text-[10px] font-semibold text-slate-500 uppercase tracking-wider" style={{ fontFamily: "'Fira Code', monospace" }}>
+                              Stage {colIdx + 1}
+                            </div>
+                            <div className="space-y-3">
+                              {column.map((path) => {
+                                const meta = architectureGraph.nodeMeta[path];
+                                return (
+                                  <motion.div
+                                    key={path}
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    className="bg-[#0F172A] border border-[#1E293B] rounded-xl p-4 hover:border-[#22C55E]/30 transition-colors"
+                                  >
+                                    <div className="flex items-center gap-2 mb-2">
+                                      <div className={`w-7 h-7 rounded-md flex items-center justify-center ${
+                                        meta?.isComponent
+                                          ? 'bg-[#22C55E]/10 border border-[#22C55E]/20'
+                                          : 'bg-cyan-500/10 border border-cyan-500/20'
+                                      }`}>
+                                        {meta?.isComponent
+                                          ? <Cpu size={13} className="text-[#22C55E]" />
+                                          : <FileCode size={13} className="text-cyan-400" />
+                                        }
+                                      </div>
+                                      <div className="text-sm font-semibold text-[#F8FAFC] truncate">{meta?.fileName || path}</div>
+                                    </div>
+                                    <div className="text-[10px] text-slate-500" style={{ fontFamily: "'Fira Code', monospace" }}>
+                                      {meta?.isComponent ? 'Component' : 'Module'}  {meta?.lines || 0} lines
+                                    </div>
+                                  </motion.div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
 
-                          return (
-                            <motion.div
-                              key={file.path}
-                              initial={{ opacity: 0, y: 10 }}
-                              animate={{ opacity: 1, y: 0 }}
-                              transition={{ delay: idx * 0.05 }}
-                              className="bg-[#0F172A] border border-[#1E293B] rounded-xl p-5 hover:border-[#22C55E]/20 transition-colors"
-                            >
-                              <div className="flex items-center gap-3 mb-3">
-                                <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                                  isComponent
-                                    ? 'bg-[#22C55E]/10 border border-[#22C55E]/20'
-                                    : 'bg-cyan-500/10 border border-cyan-500/20'
-                                }`}>
-                                  {isComponent
-                                    ? <Cpu size={14} className="text-[#22C55E]" />
-                                    : <FileCode size={14} className="text-cyan-400" />
-                                  }
-                                </div>
-                                <div>
-                                  <div className="text-sm font-semibold text-[#F8FAFC]">{fileName}</div>
-                                  <div className="text-[10px] text-slate-500" style={{ fontFamily: "'Fira Code', monospace" }}>
-                                    {isComponent ? 'Component' : 'Module'} · {file.content.split('\n').length} lines
-                                  </div>
-                                </div>
+                      <div className="bg-[#0F172A]/60 border border-[#1E293B] rounded-xl p-4">
+                        <div className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-3" style={{ fontFamily: "'Fira Code', monospace" }}>
+                          Connections
+                        </div>
+                        {architectureGraph.edges.length === 0 ? (
+                          <div className="text-xs text-slate-600">No file dependencies detected yet.</div>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {architectureGraph.edges.map((edge, idx) => (
+                              <div key={`${edge.from}-${edge.to}-${idx}`} className="text-[11px] text-slate-400 flex items-center gap-2">
+                                <span className="px-2 py-0.5 rounded bg-[#020617] border border-[#1E293B]">{architectureGraph.nodeMeta[edge.from]?.fileName || edge.from}</span>
+                                <ChevronRight size={12} className="text-slate-600" />
+                                <span className="px-2 py-0.5 rounded bg-[#020617] border border-[#1E293B]">{architectureGraph.nodeMeta[edge.to]?.fileName || edge.to}</span>
                               </div>
-
-                              {imports.length > 0 && (
-                                <div className="flex flex-wrap gap-1.5 mt-2">
-                                  {imports.map((imp, impIdx) => (
-                                    <span key={`${imp}-${impIdx}`} className="px-2 py-0.5 rounded-md bg-[#020617] border border-[#1E293B] text-[9px] text-slate-500" style={{ fontFamily: "'Fira Code', monospace" }}>
-                                      {imp}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                            </motion.div>
-                          );
-                        })}
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   )}
                 </div>
