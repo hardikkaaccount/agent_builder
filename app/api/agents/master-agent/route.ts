@@ -60,9 +60,9 @@ GOOD: "Research round-trip flight options from New York (JFK) to Tokyo (NRT/HND)
 - Node names: lowercase-hyphenated (e.g. "market-analysis", "budget-planner")
 
 ### Roles
-- worker: Does a specific task (90% of nodes)
-- coordinator: Combines outputs from multiple workers
-- validator: Quality-checks before final output
+- Role labels are FREE-FORM. You can invent role names when useful.
+- Keep role names short and descriptive (examples: "researcher", "planner", "reviewer", "synthesizer", "qa-check").
+- Reuse role labels across nodes when they share behavior.
 
 ## USER DATA
 If the user provides specific data, numbers, URLs, or context — pass it through as node inputs. Nodes can reference this data in their tasks.
@@ -81,7 +81,7 @@ Respond with ONLY valid JSON (no markdown fences, no extra text):
       {
         "id": "<unique-slug>",
         "name": "descriptive-name",
-        "role": "worker",
+        "role": "<free-form role label>",
         "task": "EXTREMELY DETAILED task description. Tell the agent exactly what to do, what to focus on, what format to output. The more specific, the better the result.",
         "tools": ["research", "analyze"],
         "inputs": {
@@ -209,22 +209,24 @@ function enrichWorkflow(data: any): Workflow {
 }
 
 function enrichNode(data: any): AgentNode {
-  // Filter tools to valid registry entries
-  const rawTools: string[] = (data.tools || []).filter((t: string) => typeof t === 'string');
-  const validTools = rawTools.filter(t => VALID_TOOLS.has(t));
+  const rawTools: string[] = (data.tools || [])
+    .filter((t: unknown): t is string => typeof t === 'string')
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
 
-  // If no tools assigned, infer from role
-  if (validTools.length === 0) {
-    if (data.role === 'coordinator') validTools.push('aggregate');
-    else if (data.role === 'validator') validTools.push('validate');
-    else validTools.push('research'); // default for workers
+  // Allow custom tools beyond registry (no predefined restriction).
+  // Known tools still get richer prompt hints during execution.
+  const allTools = Array.from(new Set(rawTools));
+
+  if (allTools.length === 0) {
+    allTools.push('reason');
   }
 
   return {
     id: data.id || generateNodeId(),
     name: data.name || 'node',
     description: data.description || data.task || '',
-    role: data.role || 'worker',
+    role: (data.role || 'worker').toString(),
     task: data.task || '',
     systemPrompt: data.systemPrompt,
     inputs: normalizeIO(data.inputs || {}),
@@ -236,9 +238,9 @@ function enrichNode(data: any): AgentNode {
     temperature: data.temperature ?? 0.5,
     maxTokens: data.maxTokens ?? 4096,
     topP: data.topP ?? 1,
-    tools: validTools.map(name => ({
+    tools: allTools.map(name => ({
       name,
-      description: '',
+      description: VALID_TOOLS.has(name) ? '' : `Custom capability: ${name}`,
       inputSchema: {},
       outputSchema: {},
     })),

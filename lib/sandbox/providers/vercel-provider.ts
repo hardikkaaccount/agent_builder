@@ -30,12 +30,12 @@ export class VercelProvider extends SandboxProvider {
       };
 
       // Add authentication based on environment variables
-      if (process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID) {
+      if (process.env.VERCEL_OIDC_TOKEN) {
+        sandboxConfig.oidcToken = process.env.VERCEL_OIDC_TOKEN;
+      } else if (process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID) {
         sandboxConfig.teamId = process.env.VERCEL_TEAM_ID;
         sandboxConfig.projectId = process.env.VERCEL_PROJECT_ID;
         sandboxConfig.token = process.env.VERCEL_TOKEN;
-      } else if (process.env.VERCEL_OIDC_TOKEN) {
-        sandboxConfig.oidcToken = process.env.VERCEL_OIDC_TOKEN;
       }
 
       this.sandbox = await Sandbox.create(sandboxConfig);

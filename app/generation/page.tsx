@@ -1,9 +1,10 @@
 'use client';
 
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Workflow, ExecutionState } from '@/types/agent';
+import { Workflow, ExecutionState, AgentNode } from '@/types/agent';
 import { WorkflowBuilder } from '@/components/app/agent-builder/WorkflowBuilder';
 import { OutputRenderer } from '@/components/app/execution/OutputRenderer';
+import { addNodeToWorkflow, removeNodeFromWorkflow, updateNodeInWorkflow, validateWorkflow } from '@/lib/ai/workflow-utils';
 import {
   Sparkles, AlertCircle, CheckCircle, Network, ChevronDown,
   Cpu, ShieldCheck, Activity, MessageSquare, Send, Bot, User,
@@ -56,16 +57,46 @@ export default function GenerationPage() {
   const [nodeOutputs, setNodeOutputs] = useState<Record<string, string>>({});
   const [executionComplete, setExecutionComplete] = useState(false);
   const [rightPanel, setRightPanel] = useState<RightPanelView>('dag');
+  const [showNodeComposer, setShowNodeComposer] = useState(false);
+  const [nodePrompt, setNodePrompt] = useState('');
+  const [nodeGenerationLoading, setNodeGenerationLoading] = useState(false);
+  const [selectedDependencies, setSelectedDependencies] = useState<string[]>([]);
 
   const chatEndRef = useRef<HTMLDivElement>(null);
   const telemetryEndRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<XMLHttpRequest | null>(null);
+  const messageCounterRef = useRef(0);
+
+  const createMessageId = useCallback(() => {
+    messageCounterRef.current += 1;
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `msg-${Date.now()}-${messageCounterRef.current}`;
+  }, []);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
   useEffect(() => { telemetryEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [telemetry]);
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.abort();
+        eventSourceRef.current = null;
+      }
+    };
+  }, []);
+
+  const applyWorkflowUpdate = useCallback((next: Workflow): Workflow | null => {
+    const validation = validateWorkflow(next);
+    if (!validation.valid) {
+      setError(`Workflow validation failed: ${validation.errors[0] || 'Invalid graph'}`);
+      return null;
+    }
+    return next;
+  }, []);
 
   const addMessage = (role: 'user' | 'assistant', content: string) => {
-    setMessages(prev => [...prev, { id: Date.now().toString(), role, content, timestamp: new Date() }]);
+    setMessages(prev => [...prev, { id: createMessageId(), role, content, timestamp: new Date() }]);
   };
 
   const addTelemetry = useCallback((entry: TelemetryEntry) => {
@@ -93,6 +124,9 @@ export default function GenerationPage() {
       setNodeOutputs({});
       setExecutionComplete(false);
       setRightPanel('dag');
+      setShowNodeComposer(false);
+      setNodePrompt('');
+      setSelectedDependencies([]);
       addMessage('assistant',
         `✅ Synthesized **${data.workflow.name}** — ${data.workflow.nodes.length} specialized agents across ${data.workflow.nodes.length} execution stages.\n\nClick **Execute Pipeline** to run the workflow in real-time.`
       );
@@ -107,6 +141,11 @@ export default function GenerationPage() {
 
   const handleExecuteWorkflow = useCallback(() => {
     if (!workflow || isExecuting) return;
+
+    if (eventSourceRef.current) {
+      eventSourceRef.current.abort();
+      eventSourceRef.current = null;
+    }
 
     setIsExecuting(true);
     setExecutionComplete(false);
@@ -242,6 +281,71 @@ export default function GenerationPage() {
         break;
     }
   }, [workflow, addTelemetry]);
+
+  const handleUpdateNode = useCallback((nodeId: string, updates: Partial<AgentNode>) => {
+    setWorkflow(prev => {
+      if (!prev) return prev;
+      const next = updateNodeInWorkflow(prev, nodeId, updates);
+      return applyWorkflowUpdate(next) ?? prev;
+    });
+  }, [applyWorkflowUpdate]);
+
+  const handleDeleteNode = useCallback((nodeId: string) => {
+    setWorkflow(prev => {
+      if (!prev) return prev;
+      const next = removeNodeFromWorkflow(prev, nodeId);
+      return applyWorkflowUpdate(next) ?? prev;
+    });
+  }, [applyWorkflowUpdate]);
+
+  const handleAddCustomNode = useCallback(async () => {
+    if (!workflow) return;
+    const trimmedPrompt = nodePrompt.trim();
+    if (!trimmedPrompt) {
+      setError('Please describe what this custom node should do.');
+      return;
+    }
+
+    setNodeGenerationLoading(true);
+    setError('');
+    try {
+      const res = await fetch('/api/agents/generate-node', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: trimmedPrompt,
+          workflow,
+          dependencies: selectedDependencies,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data?.error || 'Failed to generate custom node');
+      }
+
+      const data = await res.json();
+      if (!data?.node) throw new Error('Node generation returned empty data');
+
+      setWorkflow(prev => {
+        if (!prev) return prev;
+        const next = addNodeToWorkflow(prev, {
+          ...data.node,
+          dependencies: selectedDependencies,
+        });
+        return applyWorkflowUpdate(next) ?? prev;
+      });
+
+      addMessage('assistant', `Added custom node "${data.node.name}" to the workflow.`);
+      setShowNodeComposer(false);
+      setNodePrompt('');
+      setSelectedDependencies([]);
+    } catch (err: any) {
+      setError(err?.message || 'Unable to add custom node');
+    } finally {
+      setNodeGenerationLoading(false);
+    }
+  }, [workflow, nodePrompt, selectedDependencies, applyWorkflowUpdate]);
 
 
   // Build an executionState-compatible object for WorkflowBuilder
@@ -415,6 +519,15 @@ export default function GenerationPage() {
 
             <div className="flex items-center gap-2">
               {workflow && (
+                <button
+                  onClick={() => setShowNodeComposer(true)}
+                  className="flex items-center gap-2 px-4 py-1.5 rounded-md bg-[#1E293B]/60 border border-[#334155] text-slate-200 text-[10px] font-bold uppercase tracking-wider hover:bg-[#1E293B] transition-colors duration-200 cursor-pointer"
+                  style={{ fontFamily: "'Fira Code', monospace" }}
+                >
+                  + Custom Node
+                </button>
+              )}
+              {workflow && (
                 <button onClick={handleExecuteWorkflow} disabled={isExecuting}
                   className="flex items-center gap-2 px-4 py-1.5 rounded-md bg-[#22C55E] text-[#020617] text-[10px] font-bold uppercase tracking-wider hover:bg-[#16A34A] disabled:opacity-40 disabled:cursor-not-allowed transition-colors duration-200 cursor-pointer glow-box-green" style={{ fontFamily: "'Fira Code', monospace" }}>
                   {isExecuting ? <Activity size={12} className="animate-spin" /> : <Zap size={12} />}
@@ -437,6 +550,12 @@ export default function GenerationPage() {
                       isLoading={isExecuting}
                       executionState={executionState}
                       editable={true}
+                      onAddNode={() => {
+                        setShowNodeComposer(true);
+                        setRightPanel('dag');
+                      }}
+                      onUpdateNode={handleUpdateNode}
+                      onDeleteNode={handleDeleteNode}
                     />
                   ) : (
                     <div className="h-full flex items-center justify-center">
@@ -492,6 +611,91 @@ export default function GenerationPage() {
                     )}
                     <div ref={telemetryEndRef} />
                   </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+
+            <AnimatePresence>
+              {showNodeComposer && workflow && (
+                <motion.div
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="absolute inset-0 z-40 bg-black/60 backdrop-blur-[1px] flex items-center justify-center p-4"
+                >
+                  <motion.div
+                    initial={{ y: 20, opacity: 0 }}
+                    animate={{ y: 0, opacity: 1 }}
+                    exit={{ y: 20, opacity: 0 }}
+                    className="w-full max-w-2xl rounded-xl border border-[#1E293B] bg-[#0F172A] p-5"
+                  >
+                    <div className="flex items-center justify-between mb-4">
+                      <h3 className="text-sm font-semibold text-[#F8FAFC]">Generate Custom Node</h3>
+                      <button
+                        onClick={() => setShowNodeComposer(false)}
+                        className="text-xs text-slate-500 hover:text-slate-200"
+                      >
+                        Close
+                      </button>
+                    </div>
+
+                    <p className="text-xs text-slate-400 mb-3">
+                      Describe the exact agent behavior you want. This creates a new node on the fly.
+                    </p>
+                    <textarea
+                      value={nodePrompt}
+                      onChange={(e) => setNodePrompt(e.target.value)}
+                      placeholder="Example: Create a reviewer node that checks generated API docs for missing endpoints and returns a prioritized fix list."
+                      className="w-full min-h-[110px] bg-[#020617] border border-[#1E293B] rounded-lg px-3 py-2 text-xs text-slate-100 focus:outline-none focus:border-[#22C55E]/50"
+                    />
+
+                    <div className="mt-4">
+                      <label className="text-[10px] uppercase tracking-wider text-slate-500 block mb-2" style={{ fontFamily: "'Fira Code', monospace" }}>
+                        Dependencies (optional)
+                      </label>
+                      <div className="flex flex-wrap gap-2 max-h-32 overflow-auto pr-1">
+                        {workflow.nodes.map((node) => {
+                          const selected = selectedDependencies.includes(node.id);
+                          return (
+                            <button
+                              key={node.id}
+                              onClick={() =>
+                                setSelectedDependencies((prev) =>
+                                  prev.includes(node.id)
+                                    ? prev.filter((id) => id !== node.id)
+                                    : [...prev, node.id]
+                                )
+                              }
+                              className={`px-2.5 py-1.5 rounded-md text-[10px] border transition-colors ${
+                                selected
+                                  ? 'border-[#22C55E]/60 bg-[#22C55E]/10 text-[#22C55E]'
+                                  : 'border-[#334155] bg-[#020617] text-slate-400 hover:text-slate-200'
+                              }`}
+                              style={{ fontFamily: "'Fira Code', monospace" }}
+                            >
+                              {node.name}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="mt-5 flex items-center justify-end gap-2">
+                      <button
+                        onClick={() => setShowNodeComposer(false)}
+                        className="px-3 py-2 rounded-md text-xs font-semibold text-slate-300 bg-[#111827] border border-[#334155] hover:bg-[#1F2937]"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={handleAddCustomNode}
+                        disabled={nodeGenerationLoading || !nodePrompt.trim()}
+                        className="px-3 py-2 rounded-md text-xs font-semibold text-[#020617] bg-[#22C55E] hover:bg-[#16A34A] disabled:opacity-40 disabled:cursor-not-allowed"
+                      >
+                        {nodeGenerationLoading ? 'Generating...' : 'Generate Node'}
+                      </button>
+                    </div>
+                  </motion.div>
                 </motion.div>
               )}
             </AnimatePresence>

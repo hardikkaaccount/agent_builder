@@ -7,7 +7,8 @@
 // AGENT & WORKFLOW TYPES
 // ============================================================================
 
-export type AgentRole = 'master' | 'coordinator' | 'delegator' | 'worker' | 'validator';
+export type BuiltInAgentRole = 'master' | 'coordinator' | 'delegator' | 'worker' | 'validator';
+export type AgentRole = BuiltInAgentRole | (string & {});
 export type NodeStatus = 'pending' | 'running' | 'testing' | 'success' | 'failed' | 'skipped' | 'retrying';
 export type WorkflowStatus = 'draft' | 'pending' | 'running' | 'paused' | 'completed' | 'failed' | 'archived';
 export type ExecutionEnvironment = 'sandbox' | 'local' | 'cloud';

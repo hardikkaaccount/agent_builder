@@ -11,7 +11,7 @@
 
 import { NextRequest } from 'next/server';
 import { Workflow } from '@/types/agent';
-import { getToolPromptHints } from '@/lib/ai/tools/tool-registry';
+import { getTool, getToolPromptHints } from '@/lib/ai/tools/tool-registry';
 import { writeAgentOutput } from '@/lib/ai/tools/write-file';
 import { getProviderForModel } from '@/lib/ai/provider-manager';
 import { appConfig } from '@/config/app.config';
@@ -52,6 +52,10 @@ function buildStages(workflow: Workflow): string[][] {
     if (stage.length === 0) break;
     for (const id of stage) { resolved.add(id); remaining.delete(id); }
     stages.push(stage);
+  }
+
+  if (remaining.size > 0) {
+    throw new Error(`Workflow graph is invalid. Unresolvable nodes: ${Array.from(remaining).join(', ')}`);
   }
   return stages;
 }
@@ -126,9 +130,14 @@ function buildSystemPrompt(node: any, contextStr: string): string {
   // Get tool prompt hints (shapes HOW the LLM approaches the task)
   const toolNames: string[] = (node.tools || [])
     .map((t: any) => typeof t === 'string' ? t : t.name)
+    .map((t: string) => t.trim().toLowerCase())
     .filter(Boolean);
 
   const toolHints = getToolPromptHints(toolNames);
+  const customToolNames = toolNames.filter((name) => !getTool(name));
+  const customToolHints = customToolNames.length > 0
+    ? customToolNames.map((name) => `- ${name}: Treat this as a custom capability label. Adapt your reasoning style to satisfy "${name}" explicitly.`).join('\n')
+    : '';
 
   const outputDesc = Object.entries(node.outputs || {})
     .map(([key, schema]: [string, any]) => `- **${key}** (${schema.type}): ${schema.description}`)
@@ -143,6 +152,7 @@ ${toolNames.length > 0 ? `Capabilities: ${toolNames.join(', ')}` : ''}
 
 ## Your Approach
 ${toolHints || 'Execute your task thoroughly and completely.'}
+${customToolHints ? `\nCustom capability hints:\n${customToolHints}` : ''}
 
 ## Your Task
 ${node.task}

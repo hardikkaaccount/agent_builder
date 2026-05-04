@@ -2,10 +2,13 @@ import { NextResponse } from 'next/server';
 import { Sandbox } from '@vercel/sandbox';
 import type { SandboxState } from '@/types/sandbox';
 import { appConfig } from '@/config/app.config';
+import { SandboxFactory } from '@/lib/sandbox/factory';
+import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
 
 // Store active sandbox globally
 declare global {
   var activeSandbox: any;
+  var activeSandboxProvider: any;
   var sandboxData: any;
   var existingFiles: Set<string>;
   var sandboxState: SandboxState;
@@ -28,7 +31,7 @@ export async function POST() {
   }
 
   // Check if we already have an active sandbox
-  if (global.activeSandbox && global.sandboxData) {
+  if ((global.activeSandbox || global.activeSandboxProvider) && global.sandboxData) {
     console.log('[create-ai-sandbox] Returning existing active sandbox');
     return NextResponse.json({
       success: true,
@@ -50,8 +53,7 @@ export async function POST() {
     console.error('[create-ai-sandbox] Sandbox creation failed:', error);
     return NextResponse.json(
       { 
-        error: error instanceof Error ? error.message : 'Failed to create sandbox',
-        details: error instanceof Error ? error.stack : undefined
+        error: error instanceof Error ? error.message : 'Failed to create sandbox'
       },
       { status: 500 }
     );
@@ -78,6 +80,16 @@ async function createSandboxInternal() {
       global.activeSandbox = null;
       global.sandboxData = null;
     }
+    if (global.activeSandboxProvider) {
+      console.log('[create-ai-sandbox] Terminating existing provider sandbox...');
+      try {
+        await global.activeSandboxProvider.terminate();
+      } catch (e) {
+        console.error('Failed to terminate existing provider sandbox:', e);
+      }
+      global.activeSandboxProvider = null;
+    }
+    await sandboxManager.terminateAll();
     
     // Clear existing files tracking
     if (global.existingFiles) {
@@ -97,18 +109,28 @@ async function createSandboxInternal() {
     };
     
     // Add authentication parameters if using personal access token
-    if (process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID) {
+    if (process.env.VERCEL_OIDC_TOKEN) {
+      console.log('[create-ai-sandbox] Using OIDC token authentication');
+      sandboxConfig.oidcToken = process.env.VERCEL_OIDC_TOKEN;
+    } else if (process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID) {
       console.log('[create-ai-sandbox] Using personal access token authentication');
       sandboxConfig.teamId = process.env.VERCEL_TEAM_ID;
       sandboxConfig.projectId = process.env.VERCEL_PROJECT_ID;
       sandboxConfig.token = process.env.VERCEL_TOKEN;
-    } else if (process.env.VERCEL_OIDC_TOKEN) {
-      console.log('[create-ai-sandbox] Using OIDC token authentication');
     } else {
       console.log('[create-ai-sandbox] No authentication found - relying on default Vercel authentication');
     }
     
-    sandbox = await Sandbox.create(sandboxConfig);
+    try {
+      sandbox = await Sandbox.create(sandboxConfig);
+    } catch (error: any) {
+      if (isVercelAuthError(error)) {
+        console.warn('[create-ai-sandbox] Vercel auth failed. Attempting non-Vercel fallback...');
+        const fallback = await createProviderFallback(error);
+        return fallback;
+      }
+      throw error;
+    }
     
     const sandboxId = sandbox.sandboxId;
     console.log(`[create-ai-sandbox] Sandbox created: ${sandboxId}`);
@@ -316,6 +338,7 @@ body {
 
     // Store sandbox globally
     global.activeSandbox = sandbox;
+    global.activeSandboxProvider = null;
     global.sandboxData = {
       sandboxId,
       url: sandboxUrl,
@@ -377,8 +400,88 @@ body {
     
     // Clear global state on error
     global.activeSandbox = null;
+    global.activeSandboxProvider = null;
     global.sandboxData = null;
     
     throw error; // Throw to be caught by the outer handler
   }
+}
+
+function isVercelAuthError(error: any): boolean {
+  const msg = String(error?.message || '').toLowerCase();
+  const text = String(error?.text || '').toLowerCase();
+  const status = Number(error?.response?.status || 0);
+  return (
+    status === 401 ||
+    status === 403 ||
+    msg.includes('not authorized') ||
+    text.includes('invalidtoken') ||
+    text.includes('not authorized') ||
+    text.includes('"forbidden"')
+  );
+}
+
+async function createProviderFallback(originalError?: any) {
+  // Important: if Vercel auth already failed with invalid token,
+  // do NOT retry Vercel through provider fallback.
+  if (!process.env.E2B_API_KEY) {
+    const upstream = String(originalError?.text || originalError?.message || 'unknown');
+    throw new Error(
+      `Sandbox authentication failed for Vercel (invalid token). ` +
+      `Configure E2B_API_KEY for fallback or fix VERCEL_TOKEN/VERCEL_OIDC_TOKEN. ` +
+      `Upstream: ${upstream}`
+    );
+  }
+
+  const provider = SandboxFactory.create('e2b');
+  let sandboxInfo;
+  try {
+    sandboxInfo = await provider.createSandbox();
+  } catch (e: any) {
+    throw new Error(
+      `Vercel auth failed and E2B fallback could not start. ` +
+      `Check E2B_API_KEY. Details: ${e?.message || 'Unknown error'}`
+    );
+  }
+  await provider.setupViteApp();
+  sandboxManager.registerSandbox(sandboxInfo.sandboxId, provider);
+
+  global.activeSandbox = null;
+  global.activeSandboxProvider = provider;
+  global.sandboxData = {
+    sandboxId: sandboxInfo.sandboxId,
+    url: sandboxInfo.url,
+    provider: sandboxInfo.provider,
+  };
+
+  global.sandboxState = {
+    fileCache: {
+      files: {},
+      lastSync: Date.now(),
+      sandboxId: sandboxInfo.sandboxId,
+    },
+    sandbox: provider,
+    sandboxData: {
+      sandboxId: sandboxInfo.sandboxId,
+      url: sandboxInfo.url,
+    },
+  };
+
+  global.existingFiles.add('src/App.jsx');
+  global.existingFiles.add('src/main.jsx');
+  global.existingFiles.add('src/index.css');
+  global.existingFiles.add('index.html');
+  global.existingFiles.add('package.json');
+  global.existingFiles.add('vite.config.js');
+  global.existingFiles.add('tailwind.config.js');
+  global.existingFiles.add('postcss.config.js');
+
+  console.log('[create-ai-sandbox] Fallback provider sandbox ready at:', sandboxInfo.url);
+  return {
+    success: true,
+    sandboxId: sandboxInfo.sandboxId,
+    url: sandboxInfo.url,
+    provider: sandboxInfo.provider,
+    message: `Sandbox created via fallback provider: ${sandboxInfo.provider}`,
+  };
 }
