@@ -4,7 +4,7 @@ import { createAnthropic } from '@ai-sdk/anthropic';
 import { createOpenAI } from '@ai-sdk/openai';
 import { createGoogleGenerativeAI } from '@ai-sdk/google';
 import { createAmazonBedrock } from '@ai-sdk/amazon-bedrock';
-import { streamText } from 'ai';
+import { streamText, generateText } from 'ai';
 import type { SandboxState } from '@/types/sandbox';
 import { selectFilesForEdit, getFileContents, formatFilesForAI } from '@/lib/context-selector';
 import { executeSearchPlan, formatSearchResultsForAI, selectTargetFile } from '@/lib/file-search-executor';
@@ -93,7 +93,7 @@ declare global {
 
 export async function POST(request: NextRequest) {
   try {
-    const { prompt, model = 'openai/gpt-oss-20b', context, isEdit = false } = await request.json();
+    const { prompt, model = appConfig.ai.defaultModel, context, isEdit = false } = await request.json();
     
     console.log('[generate-ai-code-stream] Received request:');
     console.log('[generate-ai-code-stream] - prompt:', prompt);
@@ -1208,10 +1208,6 @@ MORPH FAST APPLY MODE (EDIT-ONLY):
           }
         }
         
-        await sendProgress({ type: 'status', message: 'Planning application structure...' });
-        
-        console.log('\n[generate-ai-code-stream] Starting streaming response...\n');
-        
         // Track packages that need to be installed
         const packagesToInstall: string[] = [];
         
@@ -1247,6 +1243,56 @@ MORPH FAST APPLY MODE (EDIT-ONLY):
         console.log(`[generate-ai-code-stream] AI Gateway enabled: ${isUsingAIGateway}`);
         console.log(`[generate-ai-code-stream] Model string: ${model}`);
 
+        // Agentic multi-pass planning before code generation
+        let architecturePlan = '';
+        let executionPlan = '';
+        let plannedEnvVars: string[] = [];
+
+        try {
+          await sendProgress({ type: 'status', message: 'Pass 1/3: Reasoning about architecture...' });
+          architecturePlan = await runPlanningPass({
+            modelProvider,
+            actualModel,
+            maxTokens: 900,
+            system: 'You are a principal engineer. Produce a concise implementation architecture plan only.',
+            user: `User request:\n${prompt}\n\nReturn sections:\n1) Goals\n2) Proposed files\n3) Data flow\n4) Risks`,
+          });
+
+          await sendProgress({ type: 'status', message: 'Pass 2/3: Designing execution and test checklist...' });
+          executionPlan = await runPlanningPass({
+            modelProvider,
+            actualModel,
+            maxTokens: 900,
+            system: 'You are a senior reviewer. Produce a practical pre-ship checklist for code generation.',
+            user: `Request:\n${prompt}\n\nArchitecture draft:\n${architecturePlan || 'N/A'}\n\nReturn sections:\n1) Build steps\n2) Runtime checks\n3) Minimal validation test\n4) Likely env variables`,
+          });
+
+          plannedEnvVars = extractEnvVarsFromText(`${architecturePlan}\n${executionPlan}`);
+          if (plannedEnvVars.length > 0) {
+            await sendProgress({
+              type: 'status',
+              message: `Planned environment template with ${plannedEnvVars.length} key(s)`,
+            });
+          }
+
+          const planningContext = [
+            'MULTI-PASS ENGINEERING PLAN (follow this):',
+            architecturePlan || 'No architecture plan generated.',
+            executionPlan || 'No execution checklist generated.',
+          ].join('\n\n');
+
+          fullPrompt = `${planningContext}\n\n${fullPrompt}`;
+        } catch (planningError) {
+          console.warn('[generate-ai-code-stream] Planning pass failed, continuing with direct generation:', planningError);
+          await sendProgress({
+            type: 'warning',
+            message: 'Planning pass had issues, continuing with direct generation.',
+          });
+        }
+
+        await sendProgress({ type: 'status', message: 'Pass 3/3: Generating production code...' });
+        console.log('\n[generate-ai-code-stream] Starting streaming response...\n');
+
         // Make streaming API call with appropriate provider
         const streamOptions: any = {
           model: modelProvider(actualModel) as any, // Cast to any for v3 model compatibility
@@ -1274,6 +1320,13 @@ PACKAGE RULES:
 - For INITIAL generation: Use ONLY React, no external packages
 - For EDITS: You may use packages, specify them with <package> tags
 - NEVER install packages like @mendable/firecrawl-js unless explicitly requested
+
+ENVIRONMENT RULES:
+- If code uses process.env.* or import.meta.env.*, you MUST include:
+  <file path=".env.example">
+  # keys with empty placeholder values
+  </file>
+- Include every referenced env key exactly once.
 
 Examples of SYNTAX ERRORS (NEVER DO THIS):
 ❌ className="px-4 py-2 bg-blue-600 hover:bg-blue-7...
@@ -1345,8 +1398,6 @@ It's better to have 3 complete files than 10 incomplete files.`
           } catch (streamError: any) {
             console.error(`[generate-ai-code-stream] Error calling streamText (attempt ${retryCount + 1}/${maxRetries + 1}):`, streamError);
             
-            // Check if this is a Groq service unavailable error
-            const isGroqServiceError = isKimiGroq && streamError.message?.includes('Service unavailable');
             const isRetryableError = streamError.message?.includes('Service unavailable') || 
                                     streamError.message?.includes('rate limit') ||
                                     streamError.message?.includes('timeout');
@@ -1364,12 +1415,8 @@ It's better to have 3 complete files than 10 incomplete files.`
               // Wait before retry with exponential backoff
               await new Promise(resolve => setTimeout(resolve, retryCount * 2000));
               
-              // If Groq fails, try switching to a fallback model
-              if (isGroqServiceError && retryCount === maxRetries) {
-                console.log('[generate-ai-code-stream] Groq service unavailable, falling back to GPT-4');
-                streamOptions.model = openai('gpt-4-turbo');
-                actualModel = 'gpt-4-turbo';
-              }
+              // Provider pinning: do not switch providers automatically.
+              // Retries remain on the selected model/provider only.
             } else {
               // Final error, send to user
               await sendProgress({ 
@@ -1521,6 +1568,19 @@ It's better to have 3 complete files than 10 incomplete files.`
             text: conversationalBuffer.trim()
           });
         }
+
+        // Ensure generated projects include an env template when env keys are referenced
+        const detectedEnvVars = extractEnvVarsFromText(generatedCode);
+        const allEnvVars = Array.from(new Set([...plannedEnvVars, ...detectedEnvVars]));
+        if (allEnvVars.length > 0 && !hasEnvExampleFile(generatedCode)) {
+          const envExampleContent = buildEnvExampleFileContent(allEnvVars);
+          generatedCode += `\n\n<file path=".env.example">\n${envExampleContent}\n</file>`;
+          await sendProgress({
+            type: 'env',
+            message: `Generated .env.example with ${allEnvVars.length} key(s)`,
+            keys: allEnvVars,
+          });
+        }
         
         // Also parse <packages> tag for multiple packages - ONLY for edits
         if (isEdit) {
@@ -1599,22 +1659,8 @@ It's better to have 3 complete files than 10 incomplete files.`
             }
           }
           
-          // Send progress for each file (reusing componentCount from streaming)
-          if (filePath.includes('components/')) {
-            const componentName = filePath.split('/').pop()?.replace('.jsx', '') || 'Component';
-            await sendProgress({ 
-              type: 'component', 
-              name: componentName,
-              path: filePath,
-              index: componentCount
-            });
-          } else if (filePath.includes('App.jsx')) {
-            await sendProgress({ 
-              type: 'app', 
-              message: 'Generated main App.jsx',
-              path: filePath
-            });
-          }
+          // Progress was already emitted during stream parsing.
+          // Do not emit again here, otherwise the UI shows duplicate "Generated:" events.
         }
         
         // Extract explanation
@@ -1902,4 +1948,56 @@ Provide the complete file content without any truncation. Include all necessary 
       error: (error as Error).message 
     }, { status: 500 });
   }
+}
+
+function extractEnvVarsFromText(content: string): string[] {
+  const vars = new Set<string>();
+  const processEnvRegex = /process\.env\.([A-Z][A-Z0-9_]+)/g;
+  const importMetaEnvRegex = /import\.meta\.env\.([A-Z][A-Z0-9_]+)/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = processEnvRegex.exec(content)) !== null) {
+    vars.add(match[1]);
+  }
+
+  while ((match = importMetaEnvRegex.exec(content)) !== null) {
+    vars.add(match[1]);
+  }
+
+  return Array.from(vars).filter(
+    (name) => !['NODE_ENV', 'MODE', 'DEV', 'PROD', 'BASE_URL'].includes(name)
+  );
+}
+
+function hasEnvExampleFile(generatedCode: string): boolean {
+  return /<file path="\.env\.example">[\s\S]*?<\/file>/.test(generatedCode);
+}
+
+function buildEnvExampleFileContent(envVars: string[]): string {
+  if (envVars.length === 0) return '# No environment variables detected';
+  return [
+    '# Environment variables for this generated project',
+    '# Fill these values before running in production',
+    ...envVars.map((key) => `${key}=`),
+  ].join('\n');
+}
+
+async function runPlanningPass(params: {
+  modelProvider: any;
+  actualModel: string;
+  system: string;
+  user: string;
+  maxTokens?: number;
+}): Promise<string> {
+  const result = await generateText({
+    model: params.modelProvider(params.actualModel) as any,
+    messages: [
+      { role: 'system', content: params.system },
+      { role: 'user', content: params.user },
+    ],
+    maxTokens: params.maxTokens ?? 1200,
+    temperature: params.actualModel.startsWith('gpt-5') ? undefined : appConfig.ai.defaultTemperature,
+  });
+
+  return result.text?.trim() || '';
 }

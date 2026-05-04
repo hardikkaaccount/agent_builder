@@ -4,6 +4,8 @@ import type { SandboxState } from '@/types/sandbox';
 import { appConfig } from '@/config/app.config';
 import { SandboxFactory } from '@/lib/sandbox/factory';
 import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
+import fs from 'fs';
+import path from 'path';
 
 // Store active sandbox globally
 declare global {
@@ -30,14 +32,24 @@ export async function POST() {
     }
   }
 
-  // Check if we already have an active sandbox
+  // Check if we already have an active sandbox (and verify it is still alive).
   if ((global.activeSandbox || global.activeSandboxProvider) && global.sandboxData) {
-    console.log('[create-ai-sandbox] Returning existing active sandbox');
-    return NextResponse.json({
-      success: true,
-      sandboxId: global.sandboxData.sandboxId,
-      url: global.sandboxData.url
-    });
+    const isHealthy = await isExistingSandboxHealthy();
+    if (isHealthy) {
+      console.log('[create-ai-sandbox] Returning existing active sandbox');
+      return NextResponse.json({
+        success: true,
+        sandboxId: global.sandboxData.sandboxId,
+        url: global.sandboxData.url
+      });
+    }
+
+    console.warn('[create-ai-sandbox] Existing sandbox is stale/unhealthy. Recreating...');
+    global.activeSandbox = null;
+    global.activeSandboxProvider = null;
+    global.sandboxData = null;
+    if (global.existingFiles) global.existingFiles.clear();
+    await sandboxManager.terminateAll();
   }
 
   // Set the creation flag
@@ -101,35 +113,93 @@ async function createSandboxInternal() {
     // Create Vercel sandbox with flexible authentication
     console.log(`[create-ai-sandbox] Creating Vercel sandbox with ${appConfig.vercelSandbox.timeoutMinutes} minute timeout...`);
     
+    const ids = getVercelIdsFromEnvOrProject();
+    const vercelTeamId = ids.teamId;
+    const vercelProjectId = ids.projectId;
+
     // Prepare sandbox configuration
     const sandboxConfig: any = {
       timeout: appConfig.vercelSandbox.timeoutMs,
       runtime: appConfig.vercelSandbox.runtime,
       ports: [appConfig.vercelSandbox.devPort]
     };
+    if (vercelTeamId) sandboxConfig.teamId = vercelTeamId;
+    if (vercelProjectId) sandboxConfig.projectId = vercelProjectId;
     
-    // Add authentication parameters if using personal access token
-    if (process.env.VERCEL_OIDC_TOKEN) {
-      console.log('[create-ai-sandbox] Using OIDC token authentication');
-      sandboxConfig.oidcToken = process.env.VERCEL_OIDC_TOKEN;
-    } else if (process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID) {
-      console.log('[create-ai-sandbox] Using personal access token authentication');
-      sandboxConfig.teamId = process.env.VERCEL_TEAM_ID;
-      sandboxConfig.projectId = process.env.VERCEL_PROJECT_ID;
-      sandboxConfig.token = process.env.VERCEL_TOKEN;
-    } else {
-      console.log('[create-ai-sandbox] No authentication found - relying on default Vercel authentication');
+    // Try Vercel auth strategies in order:
+    // 1) PAT (team/project/token) for local dev stability
+    // 2) OIDC
+    // 3) default environment auth
+    const authAttempts: Array<{ label: string; config: any }> = [];
+
+    const vercelToken = cleanEnvValue(process.env.VERCEL_TOKEN);
+    const vercelOidcToken = cleanEnvValue(process.env.VERCEL_OIDC_TOKEN);
+
+    if (vercelToken && vercelTeamId && vercelProjectId) {
+      authAttempts.push({
+        label: 'PAT',
+        config: {
+          ...sandboxConfig,
+          teamId: vercelTeamId,
+          projectId: vercelProjectId,
+          token: vercelToken,
+        },
+      });
     }
-    
-    try {
-      sandbox = await Sandbox.create(sandboxConfig);
-    } catch (error: any) {
-      if (isVercelAuthError(error)) {
-        console.warn('[create-ai-sandbox] Vercel auth failed. Attempting non-Vercel fallback...');
-        const fallback = await createProviderFallback(error);
-        return fallback;
+
+    const oidcInfo = getJwtTiming(vercelOidcToken);
+    const oidcExpired = Boolean(oidcInfo?.exp && Date.now() >= oidcInfo.exp * 1000);
+
+    if (vercelOidcToken && !oidcExpired) {
+      // Local-dev compatible: try OIDC token as direct bearer token first.
+      authAttempts.push({
+        label: 'OIDC_AS_TOKEN',
+        config: {
+          ...sandboxConfig,
+          token: vercelOidcToken,
+          ...(vercelTeamId ? { teamId: vercelTeamId } : {}),
+          ...(vercelProjectId ? { projectId: vercelProjectId } : {}),
+        },
+      });
+
+      // Native OIDC path (works in proper Vercel runtime with request headers)
+      authAttempts.push({
+        label: 'OIDC',
+        config: {
+          ...sandboxConfig,
+          oidcToken: vercelOidcToken,
+        },
+      });
+    }
+    if (vercelOidcToken && oidcExpired) {
+      console.warn(
+        `[create-ai-sandbox] Ignoring expired VERCEL_OIDC_TOKEN (exp=${new Date((oidcInfo?.exp || 0) * 1000).toISOString()})`
+      );
+    }
+
+    authAttempts.push({ label: 'DEFAULT', config: sandboxConfig, clearAuthEnv: true });
+
+    let lastAuthError: any = null;
+    for (const attempt of authAttempts as Array<{ label: string; config: any; clearAuthEnv?: boolean }>) {
+      try {
+        console.log(`[create-ai-sandbox] Trying Vercel auth method: ${attempt.label}`);
+        sandbox = await createSandboxWithOptionalEnvIsolation(attempt.config, Boolean(attempt.clearAuthEnv));
+        lastAuthError = null;
+        break;
+      } catch (error: any) {
+        if (isVercelAuthError(error)) {
+          lastAuthError = error;
+          console.warn(`[create-ai-sandbox] Auth method failed: ${attempt.label}`);
+          continue;
+        }
+        throw error;
       }
-      throw error;
+    }
+
+    if (!sandbox) {
+      console.warn('[create-ai-sandbox] All Vercel auth methods failed. Attempting non-Vercel fallback...');
+      const fallback = await createProviderFallback(lastAuthError);
+      return fallback;
     }
     
     const sandboxId = sandbox.sandboxId;
@@ -407,6 +477,103 @@ body {
   }
 }
 
+async function isExistingSandboxHealthy(): Promise<boolean> {
+  try {
+    if (global.activeSandboxProvider?.runCommand) {
+      const result = await global.activeSandboxProvider.runCommand('pwd');
+      return typeof result?.exitCode === 'number' && result.exitCode === 0;
+    }
+
+    if (global.activeSandbox?.runCommand) {
+      const result = await global.activeSandbox.runCommand({ cmd: 'pwd' });
+      return typeof result?.exitCode === 'number' && result.exitCode === 0;
+    }
+  } catch (error) {
+    console.warn('[create-ai-sandbox] Health check failed:', (error as Error).message);
+  }
+
+  return false;
+}
+
+function getVercelIdsFromEnvOrProject(): { teamId?: string; projectId?: string } {
+  const envTeamId = cleanEnvValue(process.env.VERCEL_TEAM_ID);
+  const envProjectId = cleanEnvValue(process.env.VERCEL_PROJECT_ID);
+  if (envTeamId && envProjectId) {
+    return { teamId: envTeamId, projectId: envProjectId };
+  }
+
+  try {
+    const projectJsonPath = path.join(process.cwd(), '.vercel', 'project.json');
+    if (!fs.existsSync(projectJsonPath)) {
+      return { teamId: envTeamId, projectId: envProjectId };
+    }
+    const raw = fs.readFileSync(projectJsonPath, 'utf-8');
+    const parsed = JSON.parse(raw) as { orgId?: string; projectId?: string };
+    return {
+      teamId: envTeamId || cleanEnvValue(parsed.orgId),
+      projectId: envProjectId || cleanEnvValue(parsed.projectId),
+    };
+  } catch {
+    return { teamId: envTeamId, projectId: envProjectId };
+  }
+}
+
+function cleanEnvValue(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  // Remove accidental wrapping quotes from .env values
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function getJwtTiming(token: string | undefined): { iat?: number; exp?: number } | null {
+  if (!token) return null;
+  const parts = token.split('.');
+  if (parts.length < 2) return null;
+
+  try {
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+    const decoded = Buffer.from(padded, 'base64').toString('utf-8');
+    const parsed = JSON.parse(decoded) as { iat?: number; exp?: number };
+    return { iat: parsed.iat, exp: parsed.exp };
+  } catch {
+    return null;
+  }
+}
+
+async function createSandboxWithOptionalEnvIsolation(config: any, clearAuthEnv: boolean) {
+  if (!clearAuthEnv) {
+    return Sandbox.create(config);
+  }
+
+  const original = {
+    oidc: process.env.VERCEL_OIDC_TOKEN,
+    token: process.env.VERCEL_TOKEN,
+    team: process.env.VERCEL_TEAM_ID,
+    project: process.env.VERCEL_PROJECT_ID,
+  };
+
+  try {
+    delete process.env.VERCEL_OIDC_TOKEN;
+    delete process.env.VERCEL_TOKEN;
+    delete process.env.VERCEL_TEAM_ID;
+    delete process.env.VERCEL_PROJECT_ID;
+    return await Sandbox.create(config);
+  } finally {
+    if (original.oidc !== undefined) process.env.VERCEL_OIDC_TOKEN = original.oidc;
+    if (original.token !== undefined) process.env.VERCEL_TOKEN = original.token;
+    if (original.team !== undefined) process.env.VERCEL_TEAM_ID = original.team;
+    if (original.project !== undefined) process.env.VERCEL_PROJECT_ID = original.project;
+  }
+}
+
 function isVercelAuthError(error: any): boolean {
   const msg = String(error?.message || '').toLowerCase();
   const text = String(error?.text || '').toLowerCase();
@@ -417,7 +584,11 @@ function isVercelAuthError(error: any): boolean {
     msg.includes('not authorized') ||
     text.includes('invalidtoken') ||
     text.includes('not authorized') ||
-    text.includes('"forbidden"')
+    text.includes('"forbidden"') ||
+    msg.includes('x-vercel-oidc-token') ||
+    msg.includes('missing credentials') ||
+    msg.includes('teamid') ||
+    msg.includes('projectid')
   );
 }
 

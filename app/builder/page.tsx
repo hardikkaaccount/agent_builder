@@ -7,6 +7,7 @@ import {
   FolderOpen, File, Activity, Cpu, Play, AlertCircle, Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
+import { appConfig } from '@/config/app.config';
 
 // ─────────────────────────────────────────────────────────────────
 // Types
@@ -124,7 +125,7 @@ export default function BuilderPage() {
           prompt: isEdit
             ? userPrompt
             : `Build a complete, production-quality React application for the following AI agent:\n\n"${userPrompt}"\n\nRequirements:\n- Create a beautiful, modern dark-themed UI using Tailwind CSS\n- Include all necessary components (input forms, output displays, loading states)\n- Add realistic mock functionality that demonstrates the agent's capabilities\n- Include placeholder environment variable references where real API integrations would go (e.g. process.env.REACT_APP_API_KEY)\n- Make it fully interactive and responsive\n- Use lucide-react for icons\n- Add smooth animations and transitions\n- Include a header with the agent name and a professional layout`,
-          model: 'google/gemini-2.5-flash',
+          model: appConfig.ai.defaultModel,
           isEdit,
           context: {
             sandboxId,
@@ -204,6 +205,10 @@ export default function BuilderPage() {
       if (!reader) throw new Error('No response stream');
 
       const decoder = new TextDecoder();
+      let resolvedSandboxId = sandboxId;
+      let resolvedSandboxUrl: string | null = null;
+      let applyHadErrors = false;
+      let completionErrors: string[] = [];
 
       while (true) {
         const { done, value } = await reader.read();
@@ -225,19 +230,54 @@ export default function BuilderPage() {
               } else if (data.type === 'package-progress') {
                 if (data.message) addMessage('system', data.message);
               } else if (data.type === 'error') {
-                addMessage('system', `Error: ${data.error}`);
+                applyHadErrors = true;
+                addMessage('system', `Error: ${data.error || data.message || 'Unknown apply error'}`);
+              } else if (data.type === 'validation-complete') {
+                if (!data.success) {
+                  applyHadErrors = true;
+                  addMessage('system', data.message || 'Validation failed.');
+                }
               } else if (data.type === 'complete') {
-                // Done
+                const nextSandboxId = data?.sandbox?.sandboxId;
+                const nextSandboxUrl = data?.sandbox?.url;
+                if (nextSandboxId) resolvedSandboxId = nextSandboxId;
+                if (nextSandboxUrl) resolvedSandboxUrl = nextSandboxUrl;
+                const errs = Array.isArray(data?.results?.errors) ? data.results.errors : [];
+                if (errs.length > 0) {
+                  applyHadErrors = true;
+                  completionErrors = errs;
+                }
               }
             } catch { /* skip */ }
           }
         }
       }
 
+      if (applyHadErrors) {
+        const errorMessage = completionErrors[0] || 'Failed to apply generated code cleanly.';
+        setState(prev => ({
+          ...prev,
+          phase: 'error',
+          error: errorMessage,
+          sandboxId: resolvedSandboxId || prev.sandboxId,
+          sandboxUrl: resolvedSandboxUrl || prev.sandboxUrl,
+        }));
+        addMessage('assistant', `Apply failed: ${errorMessage}`);
+        return false;
+      }
+
+      setState(prev => ({
+        ...prev,
+        sandboxId: resolvedSandboxId || prev.sandboxId,
+        sandboxUrl: resolvedSandboxUrl || prev.sandboxUrl,
+      }));
+
       // Fetch file contents from sandbox
       addMessage('system', 'Fetching generated files...');
       try {
-        const filesRes = await fetch('/api/get-sandbox-files');
+        const filesRes = await fetch(
+          `/api/get-sandbox-files${resolvedSandboxId ? `?sandboxId=${encodeURIComponent(resolvedSandboxId)}` : ''}`
+        );
         if (filesRes.ok) {
           const filesData = await filesRes.json();
           if (filesData.success && filesData.files) {
@@ -501,7 +541,7 @@ export default function BuilderPage() {
                 {state.sandboxUrl ? (
                   <iframe
                     key={iframeKey}
-                    src={state.sandboxUrl}
+                    src={`${state.sandboxUrl}${state.sandboxUrl.includes('?') ? '&' : '?'}t=${iframeKey}`}
                     className="w-full h-full border-0"
                     title="Agent Preview"
                     sandbox="allow-scripts allow-same-origin allow-forms allow-popups"

@@ -8,6 +8,8 @@ import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
 declare global {
   var conversationState: ConversationState | null;
   var activeSandboxProvider: any;
+  var activeSandbox: any;
+  var sandboxData: any;
   var existingFiles: Set<string>;
   var sandboxState: SandboxState;
 }
@@ -21,25 +23,96 @@ interface ParsedResponse {
   structure: string | null;
 }
 
-// List of valid lucide-react icon names (commonly used ones)
-const VALID_LUCIDE_ICONS = new Set([
-  'Home', 'Menu', 'X', 'ChevronDown', 'ChevronUp', 'ChevronLeft', 'ChevronRight',
-  'Search', 'Settings', 'User', 'Bell', 'Heart', 'Star', 'MessageSquare',
-  'Share2', 'Trash2', 'Edit', 'Copy', 'Check', 'AlertCircle', 'Info',
-  'HelpCircle', 'Plus', 'Minus', 'Lock', 'Unlock', 'Eye', 'EyeOff',
-  'Download', 'Upload', 'Share', 'Link', 'ExternalLink', 'RefreshCw',
-  'RotateCw', 'RotateCcw', 'Loader', 'Loader2', 'Calendar', 'Clock',
-  'Mail', 'Phone', 'MapPin', 'Navigation', 'Compass', 'BookOpen',
-  'Code', 'GitBranch', 'GitCommit', 'GitPullRequest', 'Github', 'Twitter',
-  'Linkedin', 'Instagram', 'Youtube', 'Dribbble', 'Figma', 'Slack',
-  'Coffee', 'Award', 'Sparkles', 'Zap', 'Flame', 'Lightbulb', 'Target',
-  'Activity', 'TrendingUp', 'TrendingDown', 'BarChart2', 'PieChart',
-  'Briefcase', 'Package', 'Layers', 'Grid', 'List', 'AlignLeft',
-  'AlignCenter', 'AlignRight', 'Volume2', 'Volume', 'VolumeMute',
-  'Wifi', 'WifiOff', 'Radio', 'Map', 'FileText', 'File', 'ImageIcon',
-  'Shield', 'AlertTriangle', 'CreditCard', 'Hexagon', 'Square',
-  'Circle', 'Triangle', 'Feather', 'Anchor', 'AlertCircle'
-]);
+function createLegacySandboxAdapter(rawSandbox: any, sandboxData?: any) {
+  const extractStdout = async (result: any): Promise<string> => {
+    if (!result) return '';
+    if (typeof result.stdout === 'function') return await result.stdout();
+    return result.stdout || '';
+  };
+
+  const extractStderr = async (result: any): Promise<string> => {
+    if (!result) return '';
+    if (typeof result.stderr === 'function') return await result.stderr();
+    return result.stderr || '';
+  };
+
+  return {
+    getSandboxInfo: () => ({
+      sandboxId: sandboxData?.sandboxId,
+      url: sandboxData?.url,
+      provider: 'vercel',
+    }),
+    async runCommand(command: string) {
+      const result = await rawSandbox.runCommand({
+        cmd: 'sh',
+        args: ['-c', command],
+        cwd: '/vercel/sandbox',
+      });
+      const stdout = await extractStdout(result);
+      const stderr = await extractStderr(result);
+      return {
+        stdout,
+        stderr,
+        exitCode: result?.exitCode ?? 0,
+        success: (result?.exitCode ?? 0) === 0,
+      };
+    },
+    async writeFile(path: string, content: string) {
+      const fullPath = path.startsWith('/') ? path : `/vercel/sandbox/${path}`;
+      await rawSandbox.writeFiles([
+        {
+          path: fullPath,
+          content: Buffer.from(content, 'utf-8'),
+        },
+      ]);
+    },
+    async readFile(path: string) {
+      const fullPath = path.startsWith('/') ? path : `/vercel/sandbox/${path}`;
+      const result = await rawSandbox.runCommand({ cmd: 'cat', args: [fullPath] });
+      return extractStdout(result);
+    },
+    async listFiles(directory = '/vercel/sandbox') {
+      const result = await rawSandbox.runCommand({
+        cmd: 'sh',
+        args: ['-c', `find ${directory} -type f -not -path "*/node_modules/*" -not -path "*/.git/*" | sed "s|^${directory}/||"`],
+        cwd: '/',
+      });
+      const stdout = await extractStdout(result);
+      return stdout.split('\n').filter((line: string) => line.trim() !== '');
+    },
+    async installPackages(packages: string[]) {
+      const result = await rawSandbox.runCommand({
+        cmd: 'npm',
+        args: ['install', ...packages],
+        cwd: '/vercel/sandbox',
+      });
+      const stdout = await extractStdout(result);
+      const stderr = await extractStderr(result);
+      return {
+        stdout,
+        stderr,
+        exitCode: result?.exitCode ?? 0,
+        success: (result?.exitCode ?? 0) === 0,
+      };
+    },
+    async restartViteServer() {
+      await rawSandbox.runCommand({
+        cmd: 'sh',
+        args: ['-c', 'pkill -f vite || true'],
+        cwd: '/',
+      });
+
+      await rawSandbox.runCommand({
+        cmd: 'sh',
+        args: ['-c', 'cd /vercel/sandbox && nohup npm run dev > /tmp/vite.log 2>&1 &'],
+        cwd: '/',
+      });
+
+      // Give Vite a short warm-up window.
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    },
+  };
+}
 
 // Map of common misspellings/variations to valid icons
 const ICON_ALIASES: Record<string, string> = {
@@ -85,20 +158,25 @@ function fixLucideReactImports(content: string): string {
     const fixedImports: string[] = [];
     
     for (const icon of importList) {
-      // Check if it's a valid icon
-      if (VALID_LUCIDE_ICONS.has(icon)) {
-        fixedImports.push(icon);
-      } else if (ICON_ALIASES[icon]) {
+      const cleanedIcon = icon.trim();
+      if (!cleanedIcon) continue;
+
+      // Use alias for known common mistakes
+      if (ICON_ALIASES[cleanedIcon]) {
         // Use the alias
-        const aliasedIcon = ICON_ALIASES[icon];
+        const aliasedIcon = ICON_ALIASES[cleanedIcon];
         if (!fixedImports.includes(aliasedIcon)) {
           fixedImports.push(aliasedIcon);
         }
         // Track this replacement
-        iconReplacements[icon] = aliasedIcon;
-        console.warn(`[apply-ai-code-stream] Replaced invalid lucide-react icon "${icon}" with "${aliasedIcon}"`);
+        iconReplacements[cleanedIcon] = aliasedIcon;
+        console.warn(`[apply-ai-code-stream] Replaced lucide-react icon "${cleanedIcon}" with "${aliasedIcon}"`);
       } else {
-        console.warn(`[apply-ai-code-stream] Removed invalid lucide-react icon: "${icon}"`);
+        // Keep icon imports as-is to avoid stripping valid lucide exports
+        // from newer package versions and causing runtime ReferenceErrors.
+        if (!fixedImports.includes(cleanedIcon)) {
+          fixedImports.push(cleanedIcon);
+        }
       }
     }
     
@@ -367,6 +445,21 @@ function parseAIResponse(response: string): ParsedResponse {
     sections.template = templResult[1].trim();
   }
 
+  // Final deduplication pass: keep the last non-empty instance per file path.
+  // This protects against duplicated generations and mixed parsing paths.
+  const dedupedFiles = new Map<string, { path: string; content: string }>();
+  for (const file of sections.files) {
+    if (!file?.path) continue;
+    const normalizedPath = file.path.trim();
+    if (!normalizedPath) continue;
+    const nextContent = (file.content || '').trim();
+    const prev = dedupedFiles.get(normalizedPath);
+    if (!prev || nextContent.length >= prev.content.length) {
+      dedupedFiles.set(normalizedPath, { path: normalizedPath, content: file.content || '' });
+    }
+  }
+  sections.files = Array.from(dedupedFiles.values());
+
   return sections;
 }
 
@@ -414,9 +507,47 @@ export async function POST(request: NextRequest) {
     // Try to get provider from sandbox manager first
     let provider = sandboxId ? sandboxManager.getProvider(sandboxId) : sandboxManager.getActiveProvider();
 
+    const isProviderForSandbox = (candidate: any, expectedSandboxId?: string): boolean => {
+      if (!candidate) return false;
+      if (!expectedSandboxId) return true;
+      try {
+        const info = candidate.getSandboxInfo?.();
+        const candidateId = info?.sandboxId;
+        return !candidateId || candidateId === expectedSandboxId;
+      } catch {
+        return true;
+      }
+    };
+
     // Fall back to global state if not found in manager
     if (!provider) {
       provider = global.activeSandboxProvider;
+    }
+
+    // Guard against stale provider from another sandbox
+    if (provider && sandboxId && !isProviderForSandbox(provider, sandboxId)) {
+      console.warn(
+        `[apply-ai-code-stream] Ignoring stale provider with mismatched sandbox id (expected ${sandboxId})`
+      );
+      provider = null;
+    }
+
+    // Legacy compatibility: if create-ai-sandbox initialized global.activeSandbox
+    // but no provider was registered in sandboxManager, adapt and reuse it.
+    if (!provider && global.activeSandbox) {
+      const activeSandboxId = global.sandboxData?.sandboxId;
+      const sandboxMatches =
+        !sandboxId ||
+        !activeSandboxId ||
+        sandboxId === activeSandboxId;
+
+      if (sandboxMatches) {
+        provider = createLegacySandboxAdapter(global.activeSandbox, global.sandboxData);
+        global.activeSandboxProvider = provider;
+        console.log(
+          `[apply-ai-code-stream] Reusing legacy active sandbox${activeSandboxId ? ` ${activeSandboxId}` : ''} via adapter`
+        );
+      }
     }
 
     // If we have a sandboxId but no provider, try to get or create one
@@ -427,7 +558,7 @@ export async function POST(request: NextRequest) {
         provider = await sandboxManager.getOrCreateProvider(sandboxId);
 
         // If we got a new provider (not reconnected), we need to create a new sandbox
-        if (!provider.getSandboxInfo()) {
+        if (!provider.getSandboxInfo() || !isProviderForSandbox(provider, sandboxId)) {
           console.log(`[apply-ai-code-stream] Creating new sandbox since reconnection failed for ${sandboxId}`);
           await provider.createSandbox();
           await provider.setupViteApp();
@@ -519,10 +650,13 @@ export async function POST(request: NextRequest) {
       };
 
       try {
+        const runPostApplyValidation = process.env.ENABLE_POST_APPLY_VALIDATION !== 'false';
+        const totalSteps = runPostApplyValidation ? 4 : 3;
+
         await sendProgress({
           type: 'start',
           message: 'Starting code application...',
-          totalSteps: 3
+          totalSteps
         });
         if (morphEnabled) {
           await sendProgress({ type: 'info', message: 'Morph Fast Apply enabled' });
@@ -593,10 +727,15 @@ export async function POST(request: NextRequest) {
                     try {
                       const data = JSON.parse(line.slice(6));
 
-                      // Forward package installation progress
+                      // Forward package installation progress without clobbering the envelope type.
                       await sendProgress({
                         type: 'package-progress',
-                        ...data
+                        packageEventType: data.type,
+                        message: data.message,
+                        installedPackages: data.installedPackages,
+                        alreadyInstalled: data.alreadyInstalled,
+                        output: data.output,
+                        stream: data.stream
                       });
 
                       // Track results
@@ -636,6 +775,10 @@ export async function POST(request: NextRequest) {
 
         // Filter out config files that shouldn't be created
         const configFiles = ['tailwind.config.js', 'vite.config.js', 'package.json', 'package-lock.json', 'tsconfig.json', 'postcss.config.js'];
+        const shouldStayAtProjectRoot = (targetPath: string): boolean => {
+          const p = targetPath.replace(/^\/+/, '');
+          return p === 'index.html' || p.startsWith('.env');
+        };
         let filteredFiles = filesArray.filter(file => {
           if (!file || typeof file !== 'object') return false;
           const fileName = (file.path || '').split('/').pop() || '';
@@ -689,7 +832,7 @@ export async function POST(request: NextRequest) {
             const fileName = normalizedPath.split('/').pop() || '';
             if (!normalizedPath.startsWith('src/') &&
                 !normalizedPath.startsWith('public/') &&
-                normalizedPath !== 'index.html' &&
+                !shouldStayAtProjectRoot(normalizedPath) &&
                 !configFiles.includes(fileName)) {
               normalizedPath = 'src/' + normalizedPath;
             }
@@ -715,7 +858,7 @@ export async function POST(request: NextRequest) {
             }
             if (!normalizedPath.startsWith('src/') &&
               !normalizedPath.startsWith('public/') &&
-              normalizedPath !== 'index.html' &&
+              !shouldStayAtProjectRoot(normalizedPath) &&
               !configFiles.includes(normalizedPath.split('/').pop() || '')) {
               normalizedPath = 'src/' + normalizedPath;
             }
@@ -845,10 +988,65 @@ export async function POST(request: NextRequest) {
           }
         }
 
+        if (runPostApplyValidation) {
+          await sendProgress({
+            type: 'step',
+            step: 4,
+            message: 'Running final validation (npm run build)...'
+          });
+
+          try {
+            const validationResult = await providerInstance.runCommand('npm run build');
+            const stdout = validationResult?.stdout || '';
+            const stderr = validationResult?.stderr || '';
+
+            if (stdout) {
+              await sendProgress({
+                type: 'validation-output',
+                stream: 'stdout',
+                output: stdout
+              });
+            }
+
+            if (stderr) {
+              await sendProgress({
+                type: 'validation-output',
+                stream: 'stderr',
+                output: stderr
+              });
+            }
+
+            if (validationResult?.exitCode === 0) {
+              await sendProgress({
+                type: 'validation-complete',
+                success: true,
+                message: 'Validation passed: build succeeded.'
+              });
+            } else {
+              const validationError = `Validation failed: npm run build exited with ${validationResult?.exitCode ?? 'unknown'}`;
+              results.errors.push(validationError);
+              await sendProgress({
+                type: 'validation-complete',
+                success: false,
+                message: validationError
+              });
+            }
+          } catch (validationError) {
+            const validationMessage = `Validation step failed: ${(validationError as Error).message}`;
+            results.errors.push(validationMessage);
+            await sendProgress({
+              type: 'validation-complete',
+              success: false,
+              message: validationMessage
+            });
+          }
+        }
+
         // Send final results
         await sendProgress({
           type: 'complete',
           results,
+          sandbox: providerInstance.getSandboxInfo?.() || global.sandboxData || null,
           explanation: parsed.explanation,
           structure: parsed.structure,
           message: `Successfully applied ${results.filesCreated.length} files`

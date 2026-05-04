@@ -7,13 +7,36 @@ import { sandboxManager } from '@/lib/sandbox/sandbox-manager';
 declare global {
   var activeSandbox: any;
   var activeSandboxProvider: any;
+  var sandboxData: any;
 }
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
-    const provider = sandboxManager.getActiveProvider() || global.activeSandboxProvider;
+    const { searchParams } = new URL(request.url);
+    const sandboxId = searchParams.get('sandboxId') || undefined;
 
-    if (!global.activeSandbox && !provider) {
+    let provider = sandboxId ? sandboxManager.getProvider(sandboxId) : sandboxManager.getActiveProvider();
+    if (!provider) {
+      const globalProvider = global.activeSandboxProvider;
+      if (globalProvider && sandboxId) {
+        try {
+          const info = globalProvider.getSandboxInfo?.();
+          if (!info?.sandboxId || info.sandboxId === sandboxId) {
+            provider = globalProvider;
+          }
+        } catch {
+          provider = globalProvider;
+        }
+      } else {
+        provider = globalProvider;
+      }
+    }
+
+    const hasMatchingLegacySandbox =
+      !!global.activeSandbox &&
+      (!sandboxId || !global.sandboxData?.sandboxId || global.sandboxData.sandboxId === sandboxId);
+
+    if (!hasMatchingLegacySandbox && !provider) {
       return NextResponse.json({
         success: false,
         error: 'No active sandbox'
@@ -24,7 +47,7 @@ export async function GET() {
 
     const fileList = provider
       ? (await provider.listFiles())
-          .filter((p: string) => p.match(/\.(jsx?|tsx?|css|json)$/))
+          .filter((p: string) => p.match(/\.(jsx?|tsx?|css|json)$/) || p.match(/^\.env(\..+)?$/) || p.match(/\/\.env(\..+)?$/))
       : await getLegacySandboxFileList();
 
     console.log('[get-sandbox-files] Found', fileList.length, 'files');
@@ -145,6 +168,8 @@ async function getLegacySandboxFileList(): Promise<string[]> {
       '-o', '-name', '*.ts',
       '-o', '-name', '*.css',
       '-o', '-name', '*.json',
+      '-o', '-name', '.env',
+      '-o', '-name', '.env.*',
       ')',
       '-print'
     ]

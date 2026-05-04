@@ -60,6 +60,17 @@ export async function POST(request: NextRequest) {
       await writer.write(encoder.encode(message));
     };
     
+    const restartDevServer = async (providerInstance: any) => {
+      if (typeof providerInstance?.restartViteServer === 'function') {
+        await providerInstance.restartViteServer();
+        return;
+      }
+
+      await providerInstance.runCommand('pkill -f vite || true');
+      await providerInstance.runCommand('cd /vercel/sandbox && nohup npm run dev > /tmp/vite.log 2>&1 &');
+      await new Promise(resolve => setTimeout(resolve, 3000));
+    };
+
     // Start installation in background
     (async (providerInstance) => {
       try {
@@ -144,7 +155,7 @@ export async function POST(request: NextRequest) {
           // Restart dev server
           await sendProgress({ type: 'status', message: 'Restarting development server...' });
           
-          await providerInstance.restartViteServer();
+          await restartDevServer(providerInstance);
           
           await sendProgress({ 
             type: 'complete', 
@@ -210,7 +221,7 @@ export async function POST(request: NextRequest) {
         await sendProgress({ type: 'status', message: 'Restarting development server...' });
         
         try {
-          await providerInstance.restartViteServer();
+          await restartDevServer(providerInstance);
           
           // Wait a bit for the server to start
           await new Promise(resolve => setTimeout(resolve, 3000));

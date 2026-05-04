@@ -1,9 +1,45 @@
 import { Sandbox } from '@vercel/sandbox';
 import { SandboxProvider, SandboxInfo, CommandResult } from '../types';
 // SandboxProviderConfig available through parent class
+import fs from 'fs';
+import path from 'path';
 
 export class VercelProvider extends SandboxProvider {
   private existingFiles: Set<string> = new Set();
+
+  private cleanEnvValue(value: string | undefined): string | undefined {
+    if (!value) return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    if (
+      (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+      (trimmed.startsWith("'") && trimmed.endsWith("'"))
+    ) {
+      return trimmed.slice(1, -1).trim();
+    }
+    return trimmed;
+  }
+
+  private getVercelIdsFromEnvOrProject(): { teamId?: string; projectId?: string } {
+    const envTeamId = this.cleanEnvValue(process.env.VERCEL_TEAM_ID);
+    const envProjectId = this.cleanEnvValue(process.env.VERCEL_PROJECT_ID);
+    if (envTeamId && envProjectId) return { teamId: envTeamId, projectId: envProjectId };
+
+    try {
+      const projectJsonPath = path.join(process.cwd(), '.vercel', 'project.json');
+      if (!fs.existsSync(projectJsonPath)) {
+        return { teamId: envTeamId, projectId: envProjectId };
+      }
+      const raw = fs.readFileSync(projectJsonPath, 'utf-8');
+      const parsed = JSON.parse(raw) as { orgId?: string; projectId?: string };
+      return {
+        teamId: envTeamId || this.cleanEnvValue(parsed.orgId),
+        projectId: envProjectId || this.cleanEnvValue(parsed.projectId),
+      };
+    } catch {
+      return { teamId: envTeamId, projectId: envProjectId };
+    }
+  }
 
   async createSandbox(): Promise<SandboxInfo> {
     try {
@@ -29,16 +65,55 @@ export class VercelProvider extends SandboxProvider {
         ports: [5173] // Vite port
       };
 
-      // Add authentication based on environment variables
-      if (process.env.VERCEL_OIDC_TOKEN) {
-        sandboxConfig.oidcToken = process.env.VERCEL_OIDC_TOKEN;
-      } else if (process.env.VERCEL_TOKEN && process.env.VERCEL_TEAM_ID && process.env.VERCEL_PROJECT_ID) {
-        sandboxConfig.teamId = process.env.VERCEL_TEAM_ID;
-        sandboxConfig.projectId = process.env.VERCEL_PROJECT_ID;
-        sandboxConfig.token = process.env.VERCEL_TOKEN;
+      // Try authentication methods in order for resilience:
+      // PAT -> OIDC -> default
+      const attempts: Array<any> = [];
+      const vercelToken = this.cleanEnvValue(process.env.VERCEL_TOKEN);
+      const ids = this.getVercelIdsFromEnvOrProject();
+      const vercelTeamId = ids.teamId;
+      const vercelProjectId = ids.projectId;
+      const vercelOidcToken = this.cleanEnvValue(process.env.VERCEL_OIDC_TOKEN);
+
+      if (vercelToken && vercelTeamId && vercelProjectId) {
+        attempts.push({
+          ...sandboxConfig,
+          teamId: vercelTeamId,
+          projectId: vercelProjectId,
+          token: vercelToken,
+        });
+      }
+      if (vercelOidcToken) {
+        attempts.push({
+          ...sandboxConfig,
+          token: vercelOidcToken,
+          ...(vercelTeamId ? { teamId: vercelTeamId } : {}),
+          ...(vercelProjectId ? { projectId: vercelProjectId } : {}),
+        });
+        attempts.push({
+          ...sandboxConfig,
+          oidcToken: vercelOidcToken,
+        });
+      }
+      attempts.push({ ...sandboxConfig, __clearAuthEnv: true });
+
+      let lastError: any = null;
+      for (const cfg of attempts) {
+        try {
+          const clearAuthEnv = Boolean((cfg as any).__clearAuthEnv);
+          if (clearAuthEnv) {
+            delete (cfg as any).__clearAuthEnv;
+          }
+          this.sandbox = await this.createSandboxWithOptionalEnvIsolation(cfg, clearAuthEnv);
+          lastError = null;
+          break;
+        } catch (e: any) {
+          lastError = e;
+        }
       }
 
-      this.sandbox = await Sandbox.create(sandboxConfig);
+      if (!this.sandbox) {
+        throw lastError || new Error('Failed to create Vercel sandbox with available auth methods');
+      }
       
       const sandboxId = this.sandbox.sandboxId;
       // Sandbox created successfully
@@ -650,5 +725,31 @@ body {
 
   isAlive(): boolean {
     return !!this.sandbox;
+  }
+
+  private async createSandboxWithOptionalEnvIsolation(config: any, clearAuthEnv: boolean) {
+    if (!clearAuthEnv) {
+      return Sandbox.create(config);
+    }
+
+    const original = {
+      oidc: process.env.VERCEL_OIDC_TOKEN,
+      token: process.env.VERCEL_TOKEN,
+      team: process.env.VERCEL_TEAM_ID,
+      project: process.env.VERCEL_PROJECT_ID,
+    };
+
+    try {
+      delete process.env.VERCEL_OIDC_TOKEN;
+      delete process.env.VERCEL_TOKEN;
+      delete process.env.VERCEL_TEAM_ID;
+      delete process.env.VERCEL_PROJECT_ID;
+      return await Sandbox.create(config);
+    } finally {
+      if (original.oidc !== undefined) process.env.VERCEL_OIDC_TOKEN = original.oidc;
+      if (original.token !== undefined) process.env.VERCEL_TOKEN = original.token;
+      if (original.team !== undefined) process.env.VERCEL_TEAM_ID = original.team;
+      if (original.project !== undefined) process.env.VERCEL_PROJECT_ID = original.project;
+    }
   }
 }
