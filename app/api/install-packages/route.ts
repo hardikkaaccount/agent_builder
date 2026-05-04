@@ -73,7 +73,11 @@ export async function POST(request: NextRequest) {
     
     const restartDevServer = async (providerInstance: any) => {
       if (typeof providerInstance?.restartViteServer === 'function') {
-        await providerInstance.restartViteServer();
+        const restartTimeoutMs = Number(process.env.RESTART_VITE_TIMEOUT_MS || 90000);
+        await Promise.race([
+          providerInstance.restartViteServer(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('Timed out while restarting development server')), restartTimeoutMs))
+        ]);
         return;
       }
 

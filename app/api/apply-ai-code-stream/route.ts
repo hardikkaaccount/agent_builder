@@ -762,15 +762,24 @@ export async function POST(request: NextRequest) {
             const protocol = process.env.NODE_ENV === 'production' ? 'https' : 'http';
             const host = req.headers.get('host') || 'localhost:3000';
             const apiUrl = `${protocol}://${host}/api/install-packages`;
+            const installTimeoutMs = Number(process.env.INSTALL_PACKAGES_TIMEOUT_MS || 180000);
+            const installAbortController = new AbortController();
+            const installTimeout = setTimeout(() => installAbortController.abort(), installTimeoutMs);
 
-            const installResponse = await fetch(apiUrl, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                packages: uniquePackages,
-                sandboxId: sandboxId || providerInstance.getSandboxInfo()?.sandboxId
-              })
-            });
+            let installResponse: Response;
+            try {
+              installResponse = await fetch(apiUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  packages: uniquePackages,
+                  sandboxId: sandboxId || providerInstance.getSandboxInfo()?.sandboxId
+                }),
+                signal: installAbortController.signal
+              });
+            } finally {
+              clearTimeout(installTimeout);
+            }
 
             if (installResponse.ok && installResponse.body) {
               const reader = installResponse.body.getReader();
