@@ -53,11 +53,22 @@ export async function POST(request: NextRequest) {
     const encoder = new TextEncoder();
     const stream = new TransformStream();
     const writer = stream.writable.getWriter();
+    let streamClosed = false;
     
     // Function to send progress updates
     const sendProgress = async (data: any) => {
+      if (streamClosed) return;
       const message = `data: ${JSON.stringify(data)}\n\n`;
-      await writer.write(encoder.encode(message));
+      try {
+        await writer.write(encoder.encode(message));
+      } catch (error: any) {
+        // Client may disconnect/close stream during long-running installs.
+        if (error?.code === 'ERR_INVALID_STATE' || String(error?.message || '').includes('WritableStream is closed')) {
+          streamClosed = true;
+          return;
+        }
+        throw error;
+      }
     };
     
     const restartDevServer = async (providerInstance: any) => {
@@ -260,7 +271,15 @@ export async function POST(request: NextRequest) {
         }
       } finally {
         if (heartbeat) clearInterval(heartbeat);
-        await writer.close();
+        if (!streamClosed) {
+          try {
+            await writer.close();
+          } catch (error: any) {
+            if (!(error?.code === 'ERR_INVALID_STATE' || String(error?.message || '').includes('WritableStream is closed'))) {
+              console.warn('[install-packages] writer.close warning:', error);
+            }
+          }
+        }
       }
     })(provider);
     
