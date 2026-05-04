@@ -1135,6 +1135,44 @@ export async function POST(request: NextRequest) {
           }
         }
 
+        // Ensure preview server is up (self-heal) so iframe is never blank after apply.
+        try {
+          const getHttpCode = async () => {
+            const probe = await providerInstance.runCommand('curl -s -o /dev/null -w "%{http_code}" http://localhost:3000');
+            const code = String(probe?.stdout || '').trim();
+            return code;
+          };
+
+          let code = await getHttpCode();
+          const isReady = code === '200' || code === '304';
+          if (!isReady) {
+            await sendProgress({ type: 'status', message: 'Preview server not ready. Starting dev server...' });
+            await providerInstance.runCommand('pkill -f vite || true');
+            await providerInstance.runCommand('cd /vercel/sandbox && nohup npm run dev > /tmp/vite.log 2>&1 &');
+
+            let ready = false;
+            for (let i = 0; i < 60; i++) {
+              await new Promise((resolve) => setTimeout(resolve, 1000));
+              code = await getHttpCode();
+              if (code === '200' || code === '304') {
+                ready = true;
+                break;
+              }
+            }
+
+            if (!ready) {
+              await sendProgress({ type: 'warning', message: 'Preview server is still starting; refresh preview in a few seconds.' });
+            } else {
+              await sendProgress({ type: 'status', message: 'Preview server is ready.' });
+            }
+          }
+        } catch (previewErr) {
+          await sendProgress({
+            type: 'warning',
+            message: `Preview health check warning: ${(previewErr as Error).message}`
+          });
+        }
+
         // Send final results
         await sendProgress({
           type: 'complete',

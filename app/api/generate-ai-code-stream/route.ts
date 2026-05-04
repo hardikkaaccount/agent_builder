@@ -1635,7 +1635,7 @@ It's better to have 3 complete files than 10 incomplete files.`
         
         // Parse files and send progress for each
         const fileRegex = /<file path="([^"]+)">([\s\S]*?)<\/file>/g;
-        const files = [];
+        let files = [] as Array<{ path: string; content: string }>;
         let match;
         
         while ((match = fileRegex.exec(generatedCode)) !== null) {
@@ -1661,6 +1661,67 @@ It's better to have 3 complete files than 10 incomplete files.`
           
           // Progress was already emitted during stream parsing.
           // Do not emit again here, otherwise the UI shows duplicate "Generated:" events.
+        }
+
+        // First-run quality gate: ensure we got a real runnable app, not partial output.
+        if (!isEdit && !hasMinimumFirstRunStructure(files)) {
+          await sendProgress({
+            type: 'warning',
+            message: 'Generation looked incomplete. Running strict regeneration pass...'
+          });
+
+          try {
+            const strictResult = await generateText({
+              model: modelProvider(actualModel) as any,
+              messages: [
+                {
+                  role: 'system',
+                  content: `${systemPrompt}
+
+STRICT FIRST-RUN OUTPUT CONTRACT (MUST FOLLOW):
+- Output ONLY <file path="...">...</file> blocks, no prose.
+- Include at minimum these files:
+  1) <file path="src/App.jsx">...</file>
+  2) <file path="src/components/Header.jsx">...</file>
+  3) <file path="src/components/AgentPanel.jsx">...</file>
+  4) <file path="src/index.css">...</file>
+- App.jsx MUST import and render Header and AgentPanel.
+- All files must be complete and runnable.
+- Do not include markdown fences.`
+                },
+                {
+                  role: 'user',
+                  content: `Regenerate now for request: ${prompt}
+
+Return only valid <file> blocks.`
+                }
+              ],
+              maxTokens: 8192,
+              temperature: actualModel.startsWith('gpt-5') ? undefined : 0.2,
+            });
+
+            const regeneratedCode = strictResult.text?.trim() || '';
+            const regeneratedFiles = extractFileBlocks(regeneratedCode);
+
+            if (regeneratedCode && hasMinimumFirstRunStructure(regeneratedFiles)) {
+              generatedCode = regeneratedCode;
+              files = regeneratedFiles;
+              await sendProgress({
+                type: 'status',
+                message: `Strict regeneration succeeded with ${files.length} files.`
+              });
+            } else {
+              await sendProgress({
+                type: 'warning',
+                message: 'Strict regeneration did not meet minimum structure; applying available output.'
+              });
+            }
+          } catch (strictError) {
+            await sendProgress({
+              type: 'warning',
+              message: `Strict regeneration failed: ${(strictError as Error).message}`
+            });
+          }
         }
         
         // Extract explanation
@@ -1980,6 +2041,25 @@ function buildEnvExampleFileContent(envVars: string[]): string {
     '# Fill these values before running in production',
     ...envVars.map((key) => `${key}=`),
   ].join('\n');
+}
+
+function extractFileBlocks(generatedCode: string): Array<{ path: string; content: string }> {
+  const files: Array<{ path: string; content: string }> = [];
+  const fileRegex = /<file path="([^"]+)">([\s\S]*?)<\/file>/g;
+  let match: RegExpExecArray | null;
+  while ((match = fileRegex.exec(generatedCode)) !== null) {
+    files.push({ path: match[1], content: match[2].trim() });
+  }
+  return files;
+}
+
+function hasMinimumFirstRunStructure(files: Array<{ path: string; content: string }>): boolean {
+  const paths = new Set(files.map((f) => f.path.trim()));
+  const hasApp = paths.has('src/App.jsx');
+  const hasCss = paths.has('src/index.css');
+  const hasAnyComponent = Array.from(paths).some((p) => p.startsWith('src/components/'));
+  const runnableCount = files.filter((f) => /\.(jsx?|tsx?|css|html)$/.test(f.path)).length;
+  return hasApp && hasCss && hasAnyComponent && runnableCount >= 3;
 }
 
 async function runPlanningPass(params: {
