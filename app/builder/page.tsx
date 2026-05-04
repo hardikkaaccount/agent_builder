@@ -237,6 +237,12 @@ export default function BuilderPage() {
                   applyHadErrors = true;
                   addMessage('system', data.message || 'Validation failed.');
                 }
+              } else if (data.type === 'validation-output') {
+                const output = typeof data.output === 'string' ? data.output.trim() : '';
+                if (output) {
+                  const snippet = output.length > 500 ? `${output.slice(0, 500)}...` : output;
+                  addMessage('system', `[validation:${data.stream || 'log'}]\n${snippet}`);
+                }
               } else if (data.type === 'complete') {
                 const nextSandboxId = data?.sandbox?.sandboxId;
                 const nextSandboxUrl = data?.sandbox?.url;

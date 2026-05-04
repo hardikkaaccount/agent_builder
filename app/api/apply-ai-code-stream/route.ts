@@ -108,8 +108,26 @@ function createLegacySandboxAdapter(rawSandbox: any, sandboxData?: any) {
         cwd: '/',
       });
 
-      // Give Vite a short warm-up window.
-      await new Promise((resolve) => setTimeout(resolve, 3000));
+      const waitResult = await rawSandbox.runCommand({
+        cmd: 'sh',
+        args: [
+          '-c',
+          'for i in $(seq 1 60); do code=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || true); if [ "$code" = "200" ] || [ "$code" = "304" ]; then exit 0; fi; sleep 1; done; exit 1'
+        ],
+        cwd: '/',
+      });
+
+      const exitCode = waitResult?.exitCode ?? 1;
+      if (exitCode !== 0) {
+        throw new Error('Vite did not become ready in time after restart');
+      }
+
+      // Prewarm common entrypoints to reduce first-hit timeout risk.
+      await rawSandbox.runCommand({
+        cmd: 'sh',
+        args: ['-c', 'curl -s http://localhost:3000 > /tmp/vite-prewarm.html || true; curl -s http://localhost:3000/src/main.jsx > /tmp/vite-prewarm-main.js || true'],
+        cwd: '/',
+      });
     },
   };
 }
@@ -142,8 +160,33 @@ const ICON_ALIASES: Record<string, string> = {
   'Play': 'Play',
   'Pause': 'Pause',
   'SkipBack': 'SkipBack',
-  'SkipForward': 'SkipForward'
+  'SkipForward': 'SkipForward',
+  // Common react-icons -> lucide conversions
+  'LuSearch': 'Search',
+  'LuTravel': 'Plane',
+  'LuMapPin': 'MapPin',
+  'LuLoader': 'Loader2',
+  'LuLoader2': 'Loader2',
+  'LuUser': 'User',
+  'LuSettings': 'Settings'
 };
+
+function normalizeLucideIconName(iconName: string): string {
+  const trimmed = iconName.trim();
+  if (!trimmed) return trimmed;
+  if (ICON_ALIASES[trimmed]) return ICON_ALIASES[trimmed];
+
+  // Handle common "Lu*" react-icons prefix being used with lucide-react imports.
+  if (/^Lu[A-Z]/.test(trimmed)) {
+    const candidate = trimmed.slice(2); // e.g. LuSearch -> Search
+    if (candidate) {
+      if (ICON_ALIASES[candidate]) return ICON_ALIASES[candidate];
+      return candidate;
+    }
+  }
+
+  return trimmed;
+}
 
 // Function to fix lucide-react imports in code
 function fixLucideReactImports(content: string): string {
@@ -158,8 +201,14 @@ function fixLucideReactImports(content: string): string {
     const fixedImports: string[] = [];
     
     for (const icon of importList) {
-      const cleanedIcon = icon.trim();
+      const originalIcon = icon.trim();
+      const cleanedIcon = normalizeLucideIconName(originalIcon);
       if (!cleanedIcon) continue;
+
+      if (originalIcon && originalIcon !== cleanedIcon) {
+        iconReplacements[originalIcon] = cleanedIcon;
+        console.warn(`[apply-ai-code-stream] Normalized lucide-react icon "${originalIcon}" to "${cleanedIcon}"`);
+      }
 
       // Use alias for known common mistakes
       if (ICON_ALIASES[cleanedIcon]) {
@@ -461,6 +510,19 @@ function parseAIResponse(response: string): ParsedResponse {
   sections.files = Array.from(dedupedFiles.values());
 
   return sections;
+}
+
+function sanitizeGeneratedFileContent(content: string): string {
+  let sanitized = content ?? '';
+
+  // Remove surrounding markdown fences if model accidentally wraps file content.
+  sanitized = sanitized.replace(/^\s*```[a-zA-Z0-9_-]*\s*\n/, '');
+  sanitized = sanitized.replace(/\n\s*```\s*$/, '');
+
+  // Normalize line endings to avoid parser edge cases.
+  sanitized = sanitized.replace(/\r\n/g, '\n');
+
+  return sanitized;
 }
 
 export async function POST(request: NextRequest) {
@@ -779,6 +841,11 @@ export async function POST(request: NextRequest) {
           const p = targetPath.replace(/^\/+/, '');
           return p === 'index.html' || p.startsWith('.env');
         };
+        const isRunnableUiFile = (targetPath: string): boolean => {
+          const p = targetPath.replace(/^\/+/, '');
+          if (p.startsWith('.env')) return false;
+          return /\.(jsx?|tsx?|css|html)$/.test(p);
+        };
         let filteredFiles = filesArray.filter(file => {
           if (!file || typeof file !== 'object') return false;
           const fileName = (file.path || '').split('/').pop() || '';
@@ -839,6 +906,32 @@ export async function POST(request: NextRequest) {
             return !morphUpdatedPaths.has(normalizedPath);
           });
         }
+
+        // Safety net: if first-generation output has no runnable UI files,
+        // create a minimal working app instead of leaving the preview blank.
+        const generatedRunnableFiles = filteredFiles.filter(file => file?.path && isRunnableUiFile(file.path));
+        if (!isEdit && generatedRunnableFiles.length === 0) {
+          await sendProgress({
+            type: 'warning',
+            message: 'Generator returned no runnable UI files. Creating a minimal working app fallback.'
+          });
+
+          filteredFiles.push({
+            path: 'src/App.jsx',
+            content: `export default function App() {
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-6">
+      <div className="max-w-xl text-center space-y-3">
+        <h1 className="text-3xl font-bold">AgentFlow Ready</h1>
+        <p className="text-slate-300">
+          Your sandbox is running. Describe your agent again and I will generate full UI components.
+        </p>
+      </div>
+    </div>
+  );
+}`
+          });
+        }
         
         for (const [index, file] of filteredFiles.entries()) {
           try {
@@ -866,7 +959,7 @@ export async function POST(request: NextRequest) {
             const isUpdate = global.existingFiles.has(normalizedPath);
 
             // Remove any CSS imports from JSX/JS files (we're using Tailwind)
-            let fileContent = file.content;
+            let fileContent = sanitizeGeneratedFileContent(file.content);
             if (file.path.endsWith('.jsx') || file.path.endsWith('.js') || file.path.endsWith('.tsx') || file.path.endsWith('.ts')) {
               fileContent = fileContent.replace(/import\s+['"]\.\/[^'"]+\.css['"];?\s*\n?/g, '');
             }

@@ -68,7 +68,17 @@ export async function POST(request: NextRequest) {
 
       await providerInstance.runCommand('pkill -f vite || true');
       await providerInstance.runCommand('cd /vercel/sandbox && nohup npm run dev > /tmp/vite.log 2>&1 &');
-      await new Promise(resolve => setTimeout(resolve, 3000));
+
+      const waitResult = await providerInstance.runCommand(
+        'sh -c "for i in $(seq 1 60); do code=$(curl -s -o /dev/null -w \\"%{http_code}\\" http://localhost:3000 || true); if [ \\"$code\\" = \\"200\\" ] || [ \\"$code\\" = \\"304\\" ]; then exit 0; fi; sleep 1; done; exit 1"'
+      );
+
+      if (waitResult?.exitCode !== 0) {
+        throw new Error('Vite did not become ready in time after restart');
+      }
+
+      // Warm Vite cache so first browser render avoids module timeout spikes.
+      await providerInstance.runCommand('sh -c "curl -s http://localhost:3000 > /tmp/vite-prewarm.html || true; curl -s http://localhost:3000/src/main.jsx > /tmp/vite-prewarm-main.js || true"');
     };
 
     // Start installation in background
@@ -151,15 +161,10 @@ export async function POST(request: NextRequest) {
             installedPackages: [],
             alreadyInstalled: validPackages
           });
-          
-          // Restart dev server
-          await sendProgress({ type: 'status', message: 'Restarting development server...' });
-          
-          await restartDevServer(providerInstance);
-          
+
           await sendProgress({ 
             type: 'complete', 
-            message: 'Dev server restarted!',
+            message: 'No install needed; keeping current dev server session.',
             installedPackages: []
           });
           
